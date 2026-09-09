@@ -83,7 +83,7 @@ mod tests {
     fn the_iam_module_carries_its_migrations() {
         let iam = find("iam").expect("iam should be registered");
 
-        assert_eq!(up_versions(&iam).len(), 11);
+        assert_eq!(up_versions(&iam).len(), 12);
         assert!(iam.migrator.iter().all(|m| !m.sql.is_empty()));
     }
 
