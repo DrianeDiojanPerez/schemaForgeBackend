@@ -1,0 +1,243 @@
+syntax = "proto3";
+
+package schemaforge.v1;
+
+// The canonical schema model. Both the verifier and the DDL generator read
+// this same structure, which is why the diagram, the reported errors, and the
+// generated SQL cannot describe different schemas.
+//
+// Nothing here names a database engine. A dialect lives in the generator, not
+// in the model, so a second target can be added without touching this file.
+
+message Position {
+  double x = 1;
+  double y = 2;
+}
+
+// Dialect-independent types. Each maps to a concrete type per target dialect
+// at generation time.
+enum DataTypeKind {
+  DATA_TYPE_KIND_UNSPECIFIED = 0;
+  DATA_TYPE_KIND_TEXT = 1;
+  DATA_TYPE_KIND_VARCHAR = 2;
+  DATA_TYPE_KIND_CHAR = 3;
+  DATA_TYPE_KIND_SMALL_INT = 4;
+  DATA_TYPE_KIND_INTEGER = 5;
+  DATA_TYPE_KIND_BIG_INT = 6;
+  DATA_TYPE_KIND_NUMERIC = 7;
+  DATA_TYPE_KIND_REAL = 8;
+  DATA_TYPE_KIND_DOUBLE_PRECISION = 9;
+  DATA_TYPE_KIND_BOOLEAN = 10;
+  DATA_TYPE_KIND_DATE = 11;
+  DATA_TYPE_KIND_TIME = 12;
+  DATA_TYPE_KIND_TIMESTAMP = 13;
+  DATA_TYPE_KIND_TIMESTAMPTZ = 14;
+  DATA_TYPE_KIND_UUID = 15;
+  DATA_TYPE_KIND_JSON = 16;
+  DATA_TYPE_KIND_JSONB = 17;
+  DATA_TYPE_KIND_BYTEA = 18;
+}
+
+// Parameters that do not apply to a given kind are left unset rather than
+// defaulted, so a VARCHAR without a length is distinguishable from VARCHAR(0)
+// and the verifier can say which one the user drew.
+message DataType {
+  DataTypeKind kind = 1;
+  optional uint32 length = 2;
+  optional uint32 precision = 3;
+  optional uint32 scale = 4;
+}
+
+message ForeignKeyRef {
+  string entity_id = 1;
+  string attribute_id = 2;
+}
+
+message Attribute {
+  string id = 1;
+  string name = 2;
+  // Meta-knowledge. Emitted as COMMENT ON COLUMN so documentation travels with
+  // the schema instead of being lost at export.
+  string description = 3;
+  DataType data_type = 4;
+  bool nullable = 5;
+  bool primary_key = 6;
+  bool unique = 7;
+  optional ForeignKeyRef foreign_key = 8;
+  optional string default_value = 9;
+}
+
+message Entity {
+  string id = 1;
+  string name = 2;
+  // Emitted as COMMENT ON TABLE.
+  string description = 3;
+  repeated Attribute attributes = 4;
+  // Canvas placement. Part of the model so a round-tripped diagram stays
+  // readable rather than being re-laid-out from scratch.
+  Position position = 5;
+}
+
+enum Cardinality {
+  CARDINALITY_UNSPECIFIED = 0;
+  CARDINALITY_ONE_TO_ONE = 1;
+  CARDINALITY_ONE_TO_MANY = 2;
+  CARDINALITY_MANY_TO_MANY = 3;
+}
+
+message Relationship {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  string from_entity_id = 4;
+  string from_attribute_id = 5;
+  string to_entity_id = 6;
+  string to_attribute_id = 7;
+  Cardinality cardinality = 8;
+}
+
+message Schema {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  repeated Entity entities = 4;
+  repeated Relationship relationships = 5;
+  // RFC 3339.
+  string created_at = 6;
+  string updated_at = 7;
+}
+
+// Summary form for list responses, so listing many schemas does not ship every
+// entity and relationship over the wire.
+message SchemaSummary {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  uint32 entity_count = 4;
+  uint32 relationship_count = 5;
+  string created_at = 6;
+  string updated_at = 7;
+}
+
+enum Severity {
+  SEVERITY_UNSPECIFIED = 0;
+  SEVERITY_WARNING = 1;
+  SEVERITY_ERROR = 2;
+}
+
+// A structured diagnostic rather than free text, so the same value can drive
+// both the inline canvas display and an automated test assertion.
+message Diagnostic {
+  // Stable code, for example "SF-DUP-ENTITY". Tests assert on this, not on the
+  // message, so wording can change without breaking them.
+  string code = 1;
+  Severity severity = 2;
+  string message = 3;
+  // Ids of the offending elements: entity, attribute, or relationship.
+  repeated string element_ids = 4;
+  optional Position location = 5;
+}
+
+enum Dialect {
+  DIALECT_UNSPECIFIED = 0;
+  DIALECT_POSTGRES = 1;
+  DIALECT_MYSQL = 2;
+}
+
+message CreateSchemaRequest {
+  string name = 1;
+  string description = 2;
+  repeated Entity entities = 3;
+  repeated Relationship relationships = 4;
+}
+
+message CreateSchemaResponse {
+  Schema schema = 1;
+}
+
+message GetSchemaRequest {
+  string id = 1;
+}
+
+message GetSchemaResponse {
+  Schema schema = 1;
+}
+
+message ListSchemasRequest {
+  uint32 page = 1;
+  uint32 per_page = 2;
+}
+
+message ListSchemasResponse {
+  repeated SchemaSummary schemas = 1;
+  uint32 page = 2;
+  uint32 per_page = 3;
+  uint64 total = 4;
+}
+
+// A whole-schema replace. The canvas holds the authoritative picture, so it
+// sends the picture it has rather than a field mask the backend would have to
+// reassemble.
+message UpdateSchemaRequest {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  repeated Entity entities = 4;
+  repeated Relationship relationships = 5;
+}
+
+message UpdateSchemaResponse {
+  Schema schema = 1;
+}
+
+message DeleteSchemaRequest {
+  string id = 1;
+}
+
+message DeleteSchemaResponse {}
+
+message ValidateSchemaRequest {
+  // Either validate a stored schema by id, or validate an unsaved draft the
+  // canvas is holding. Exactly one is expected.
+  oneof target {
+    string id = 1;
+    Schema draft = 2;
+  }
+}
+
+message ValidateSchemaResponse {
+  bool valid = 1;
+  repeated Diagnostic diagnostics = 2;
+}
+
+message GenerateDdlRequest {
+  oneof target {
+    string id = 1;
+    Schema draft = 2;
+  }
+  Dialect dialect = 3;
+  // Emit COMMENT ON statements carrying the descriptions.
+  bool include_comments = 4;
+}
+
+message GenerateDdlResponse {
+  string ddl = 1;
+  // Generation refuses to run on an invalid schema, so a caller that skipped
+  // ValidateSchema still gets the reason back rather than broken SQL.
+  repeated Diagnostic diagnostics = 2;
+}
+
+service SchemaService {
+  rpc CreateSchema(CreateSchemaRequest) returns (CreateSchemaResponse);
+  rpc GetSchema(GetSchemaRequest) returns (GetSchemaResponse);
+  rpc ListSchemas(ListSchemasRequest) returns (ListSchemasResponse);
+  rpc UpdateSchema(UpdateSchemaRequest) returns (UpdateSchemaResponse);
+  rpc DeleteSchema(DeleteSchemaRequest) returns (DeleteSchemaResponse);
+
+  // Milestone M2. The contract is fixed now so the frontend can be written
+  // against it; the engine lands in weeks 5-8.
+  rpc ValidateSchema(ValidateSchemaRequest) returns (ValidateSchemaResponse);
+
+  // Milestone M3. Lands in weeks 7-11.
+  rpc GenerateDdl(GenerateDdlRequest) returns (GenerateDdlResponse);
+}
