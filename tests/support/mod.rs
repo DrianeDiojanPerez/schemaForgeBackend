@@ -23,18 +23,21 @@ use schemaforge_backend::module::schema::core::domain::{
     DomainError, Schema, SchemaDraft, SchemaSummary,
 };
 use schemaforge_backend::module::schema::core::ports::SchemaRepository;
-use schemaforge_backend::module::{health, iam, schema};
+use schemaforge_backend::module::{auth, health, iam, schema};
 use schemaforge_backend::package::auth::{Auth, AuthenticationTokens, Identity};
 use schemaforge_backend::package::errdef::Error;
 use schemaforge_backend::package::pagination::{Data, ListRequest};
 use schemaforge_backend::package::rbac::Engine;
+use schemaforge_backend::rpc::v1::auth_service_client::AuthServiceClient;
 use schemaforge_backend::rpc::v1::health_service_client::HealthServiceClient;
 use schemaforge_backend::rpc::v1::schema_service_client::SchemaServiceClient;
+use schemaforge_backend::server::middlewares::rpc_auth::AuthLayer;
 use schemaforge_backend::server::{self, Modules};
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
+use tonic::service::interceptor::InterceptedService;
 use tonic::transport::{Channel, Server};
 
 pub const VALID_TOKEN: &str = "a-valid-token";
@@ -474,10 +477,38 @@ pub fn a_domain_user() -> User {
 pub struct TestServer {
     addr: SocketAddr,
     handle: JoinHandle<()>,
+    pub calls: Arc<Calls>,
+    pub user: Identity,
+}
+
+pub type Authorized = InterceptedService<
+    Channel,
+    fn(tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status>,
+>;
+
+fn bearer(mut request: tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> {
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {VALID_TOKEN}")
+            .parse()
+            .expect("the token should be a valid header value"),
+    );
+
+    Ok(request)
 }
 
 impl TestServer {
     pub async fn start() -> Self {
+        Self::with_permissions(&[
+            "Schemas.View All",
+            "Schemas.Create",
+            "Schemas.Update",
+            "Schemas.Delete",
+        ])
+        .await
+    }
+
+    pub async fn with_permissions(allowed: &[&str]) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("a free port should be available");
@@ -485,18 +516,45 @@ impl TestServer {
             .local_addr()
             .expect("the listener should report its address");
 
+        let user = a_domain_user();
+        let identity = Identity {
+            id: user.id,
+            email: user.email.clone(),
+            user_name: user.user_name.clone(),
+            password: String::new(),
+            roles: vec!["Staff".to_owned()],
+        };
+
+        let calls = Arc::new(Calls::default());
+
+        let auth: Arc<dyn Auth> = Arc::new(FakeAuth {
+            user: identity.clone(),
+        });
+        let rbac: Arc<dyn Engine> = Arc::new(FakeRbac {
+            allowed: allowed.iter().map(|action| (*action).to_owned()).collect(),
+            calls: calls.clone(),
+        });
+
         let services = fake_schema_services();
+        let layer = AuthLayer::new(auth.clone(), rbac);
 
         let handle = tokio::spawn(async move {
             Server::builder()
+                .layer(layer)
                 .add_service(health::service())
+                .add_service(auth::service(auth))
                 .add_service(schema::service(&services))
                 .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
                 .await
                 .expect("the test server should serve");
         });
 
-        Self { addr, handle }
+        Self {
+            addr,
+            handle,
+            calls,
+            user: identity,
+        }
     }
 
     async fn channel(&self) -> Channel {
@@ -508,12 +566,20 @@ impl TestServer {
             .expect("the test server should accept a connection")
     }
 
-    pub async fn schema_client(&self) -> SchemaServiceClient<Channel> {
+    pub async fn schema_client(&self) -> SchemaServiceClient<Authorized> {
+        SchemaServiceClient::with_interceptor(self.channel().await, bearer as _)
+    }
+
+    pub async fn anonymous_schema_client(&self) -> SchemaServiceClient<Channel> {
         SchemaServiceClient::new(self.channel().await)
     }
 
     pub async fn health_client(&self) -> HealthServiceClient<Channel> {
         HealthServiceClient::new(self.channel().await)
+    }
+
+    pub async fn auth_client(&self) -> AuthServiceClient<Channel> {
+        AuthServiceClient::new(self.channel().await)
     }
 }
 
