@@ -1,6 +1,6 @@
 openapi: 3.1.0
 info:
-  title: API Starter
+  title: SchemaForgeBackend
   version: "0.1.0"
   description: |
     Authentication, users and permissions, ready to build the rest of a
@@ -9,8 +9,8 @@ info:
     ## Authentication
 
     Every endpoint except `/v1/healthcheck`, `/v1/login`, `/v1/refresh-token`,
-    `/v1/forgot-password` and `/v1/reset-password` needs a bearer token from
-    `/v1/login`.
+    `/v1/forgot-password`, `/v1/reset-password` and the `/v1/schemas` routes
+    needs a bearer token from `/v1/login`.
 
     ```
     Authorization: Bearer <token>
@@ -47,6 +47,7 @@ info:
     | `1004`       | 409    | The write clashed with data already stored.      |
     | `1005`       | 422    | Your request was fine; the stored data is not.   |
     | `1006`       | 403    | Authenticated, but not allowed to do this.       |
+    | `1007`       | 501    | The route is not built yet.                      |
     | `2000`       | 500    | Something on our side failed.                    |
 
     A `1000` also carries `error.errors`, mapping each rejected field to the
@@ -57,7 +58,8 @@ info:
     ## Permissions
 
     Actions are written `Resource.Permission`, for example `Users.View All`.
-    Members of the `Admin` role bypass every permission check.
+    Members of the super role, `Admin` unless the server is configured
+    otherwise, bypass every permission check.
 
 servers:
   - url: http://localhost:3000
@@ -72,6 +74,8 @@ tags:
     description: Reading and writing user records.
   - name: Permissions
     description: The permissions the system knows about.
+  - name: Schemas
+    description: Storing, validating and generating from database designs.
 
 paths:
   /v1/healthcheck:
@@ -440,6 +444,229 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
 
+  /v1/schemas:
+    get:
+      tags: [Schemas]
+      summary: List schemas
+      description: |
+        Summaries only: each row carries the counts instead of the entities and
+        relationships, so a listing stays small no matter how large the
+        diagrams are. Read one schema to get its contents.
+      security: []
+      parameters:
+        - { name: page, in: query, schema: { type: integer, default: 1 } }
+        - { name: per_page, in: query, schema: { type: integer, default: 10 } }
+      responses:
+        "200":
+          description: A page of schema summaries.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/SchemaSummary" }
+                      pagination: { $ref: "#/components/schemas/Pagination" }
+    post:
+      tags: [Schemas]
+      summary: Create a schema
+      description: |
+        The whole diagram arrives in one body. Ids inside it are the ones the
+        canvas uses; only the schema id is assigned by the server.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SchemaDraft" }
+      responses:
+        "200":
+          description: The stored schema.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Schema" }
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+
+  /v1/schemas/validate:
+    post:
+      tags: [Schemas]
+      summary: Validate a stored schema or an unsaved draft
+      description: |
+        Send either `schema_id` or `schema`, never both. A draft is checked
+        without being stored, so the canvas can validate as you draw.
+
+        The validation engine lands in milestone M2; until then the route
+        answers `501` rather than reporting a schema as clean.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                schema_id: { type: string }
+                schema: { $ref: "#/components/schemas/SchemaDraft" }
+      responses:
+        "200":
+          description: The verdict and every diagnostic behind it.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          valid: { type: boolean }
+                          diagnostics:
+                            type: array
+                            items: { $ref: "#/components/schemas/Diagnostic" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+
+  /v1/schemas/generate-ddl:
+    post:
+      tags: [Schemas]
+      summary: Generate DDL for a stored schema or an unsaved draft
+      description: |
+        Send either `schema_id` or `schema`, never both.
+
+        The generator lands in milestone M3; until then the route answers
+        `501` rather than emitting incomplete SQL.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                schema_id: { type: string }
+                schema: { $ref: "#/components/schemas/SchemaDraft" }
+                dialect:
+                  type: string
+                  enum: [postgres, mysql]
+                  default: postgres
+                include_comments:
+                  type: boolean
+                  default: false
+                  description: Carry the descriptions into the SQL as comments.
+      responses:
+        "200":
+          description: The statements, and anything worth knowing about them.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          ddl: { type: string }
+                          diagnostics:
+                            type: array
+                            items: { $ref: "#/components/schemas/Diagnostic" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+
+  /v1/schemas/{schema-id}:
+    parameters:
+      - name: schema-id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [Schemas]
+      summary: Read one schema
+      security: []
+      responses:
+        "200":
+          description: The schema, entities and relationships included.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Schema" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [Schemas]
+      summary: Replace one schema
+      description: |
+        A whole-document write: what you send becomes the schema. Anything
+        left out is removed. The id and the creation time are kept.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SchemaDraft" }
+      responses:
+        "200":
+          description: The stored schema.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Schema" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+    delete:
+      tags: [Schemas]
+      summary: Delete one schema
+      security: []
+      responses:
+        "200":
+          description: The schema was deleted.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          message: { type: string }
+                          schema_id: { type: string }
+        "404":
+          $ref: "#/components/responses/NotFound"
+
 components:
   securitySchemes:
     bearerAuth:
@@ -554,6 +781,152 @@ components:
         next_page: { type: [integer, "null"] }
         previous_page: { type: [integer, "null"] }
 
+    SchemaDraft:
+      type: object
+      required: [name]
+      description: |
+        The diagram as the canvas holds it. Every element carries the id the
+        canvas gave it, so a round trip does not renumber anything.
+      properties:
+        name: { type: string, maxLength: 120, examples: ["course registration"] }
+        description: { type: string }
+        entities:
+          type: array
+          items: { $ref: "#/components/schemas/Entity" }
+        relationships:
+          type: array
+          items: { $ref: "#/components/schemas/Relationship" }
+
+    Schema:
+      allOf:
+        - $ref: "#/components/schemas/SchemaDraft"
+        - type: object
+          properties:
+            id: { type: string, format: uuid }
+            created_at: { type: string, format: date-time }
+            updated_at: { type: string, format: date-time }
+
+    SchemaSummary:
+      type: object
+      description: A row for a listing. It counts the diagram instead of carrying it.
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: string }
+        entity_count: { type: integer }
+        relationship_count: { type: integer }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    Entity:
+      type: object
+      required: [id, name]
+      properties:
+        id: { type: string, description: The canvas id, kept as sent. }
+        name: { type: string, examples: ["students"] }
+        description: { type: string }
+        attributes:
+          type: array
+          items: { $ref: "#/components/schemas/Attribute" }
+        position:
+          allOf: [{ $ref: "#/components/schemas/Position" }]
+          description: Where the box sits on the canvas. Defaults to the origin.
+
+    Attribute:
+      type: object
+      required: [id, name, data_type]
+      properties:
+        id: { type: string }
+        name: { type: string, examples: ["full_name"] }
+        description: { type: string }
+        data_type: { $ref: "#/components/schemas/DataType" }
+        nullable:
+          type: boolean
+          default: true
+          description: Forced to `false` on a primary key.
+        primary_key: { type: boolean, default: false }
+        unique: { type: boolean, default: false }
+        foreign_key:
+          oneOf:
+            - { $ref: "#/components/schemas/ForeignKeyRef" }
+            - { type: "null" }
+        default_value: { type: [string, "null"] }
+
+    DataType:
+      type: object
+      required: [kind]
+      description: |
+        A parameter that does not apply to the kind is dropped rather than
+        rejected, so `{ "kind": "boolean", "length": 10 }` stores a boolean.
+      properties:
+        kind:
+          type: string
+          enum:
+            - text
+            - varchar
+            - char
+            - smallint
+            - integer
+            - bigint
+            - numeric
+            - real
+            - double precision
+            - boolean
+            - date
+            - time
+            - timestamp
+            - timestamptz
+            - uuid
+            - json
+            - jsonb
+            - bytea
+        length: { type: integer, description: "`varchar` and `char` only." }
+        precision: { type: integer, description: "`numeric` only." }
+        scale: { type: integer, description: "`numeric` only." }
+
+    ForeignKeyRef:
+      type: object
+      required: [entity_id, attribute_id]
+      description: Points at an element of this schema by its canvas id.
+      properties:
+        entity_id: { type: string }
+        attribute_id: { type: string }
+
+    Relationship:
+      type: object
+      required: [id, from_entity_id, from_attribute_id, to_entity_id, to_attribute_id, cardinality]
+      properties:
+        id: { type: string }
+        name: { type: string, examples: ["enrolls"] }
+        description: { type: string }
+        from_entity_id: { type: string }
+        from_attribute_id: { type: string }
+        to_entity_id: { type: string }
+        to_attribute_id: { type: string }
+        cardinality: { type: string, enum: ["1:1", "1:N", "N:M"] }
+
+    Position:
+      type: object
+      properties:
+        x: { type: number, format: double }
+        y: { type: number, format: double }
+
+    Diagnostic:
+      type: object
+      description: One finding about a schema, addressed to the elements it concerns.
+      properties:
+        code: { type: string, examples: ["SF-KEY-MISSING"] }
+        severity: { type: string, enum: [warning, error] }
+        message: { type: string }
+        element_ids:
+          type: array
+          items: { type: string }
+          description: The canvas ids to highlight.
+        location:
+          oneOf:
+            - { $ref: "#/components/schemas/Position" }
+            - { type: "null" }
+
   responses:
     BadRequest:
       description: The request was malformed.
@@ -582,6 +955,11 @@ components:
           schema: { $ref: "#/components/schemas/Envelope" }
     ValidationFailed:
       description: The body failed validation. `error.errors` lists each rejected field.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Envelope" }
+    NotImplemented:
+      description: The route exists but the work behind it has not landed yet.
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Envelope" }
