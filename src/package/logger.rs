@@ -10,8 +10,9 @@ use crate::config::{Deployment, Logger as LoggerConfig};
 pub struct LoggerGuard(#[allow(dead_code)] WorkerGuard);
 
 pub fn init(cfg: &LoggerConfig, deployment: &Deployment) -> LoggerGuard {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(format!("api_starter={0},tower_http={0}", cfg.level)));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new(format!("schemaforge_backend={0},tower_http={0}", cfg.level))
+    });
 
     let file_appender = tracing_appender::rolling::Builder::new()
         .rotation(tracing_appender::rolling::Rotation::DAILY)

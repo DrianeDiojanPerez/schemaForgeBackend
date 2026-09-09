@@ -57,8 +57,8 @@ clean:
 
 # Create the shared network, which compose expects to already exist.
 network:
-    @docker network inspect api-starter-bridge >/dev/null 2>&1 \
-        || docker network create api-starter-bridge
+    @docker network inspect schemaforge-bridge >/dev/null 2>&1 \
+        || docker network create schemaforge-bridge
 
 # Start the API, database and mail catcher.
 up: network
@@ -77,7 +77,7 @@ rebuild: network
 services: network
     docker compose --profile dev up -d database mail
     @echo "waiting for postgres"
-    until docker exec api-starter-db pg_isready -U "$DB_USERNAME" -d "$DB_DATABASE" >/dev/null 2>&1; do sleep 1; done
+    until docker exec schemaforge-db pg_isready -U "$DB_USERNAME" -d "$DB_DATABASE" >/dev/null 2>&1; do sleep 1; done
 
 # Stop the dev stack.
 down:
