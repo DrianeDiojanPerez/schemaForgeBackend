@@ -1,6 +1,6 @@
 use axum::Router;
 
-use crate::module::{auth, health, iam};
+use crate::module::{auth, health, iam, schema};
 use crate::server::{docs, Modules};
 
 pub fn mount(modules: &Modules) -> Router {
@@ -13,4 +13,5 @@ pub fn mount(modules: &Modules) -> Router {
             modules.auth.clone(),
             modules.rbac.clone(),
         ))
+        .merge(schema::routes(&modules.schema))
 }

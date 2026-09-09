@@ -2,13 +2,11 @@ use std::sync::Arc;
 
 use crate::config::AppConfig;
 use crate::database::{Database, TxManager};
-use crate::module::iam;
+use crate::module::{iam, schema};
 use crate::package::auth::{Auth, AuthService, PostgresAuthStore};
 use crate::package::emailer::{Emailer, SmtpEmailer};
 use crate::package::jwt::{HmacTokenGenerator, TokenGenerator};
 use crate::package::rbac::{Engine, PostgresRbacStore, RbacEngine};
-
-const SUPER_ROLE: &str = "Admin";
 
 #[derive(Clone)]
 pub struct Provider {
@@ -20,6 +18,7 @@ pub struct Provider {
     pub auth: Arc<dyn Auth>,
     pub rbac: Arc<dyn Engine>,
     pub iam: iam::Services,
+    pub schema: schema::Services,
 }
 
 impl Provider {
@@ -44,11 +43,12 @@ impl Provider {
         ));
 
         let rbac: Arc<dyn Engine> = Arc::new(RbacEngine::new(
-            SUPER_ROLE,
+            config.rbac.super_role.clone(),
             Arc::new(PostgresRbacStore::new(database.clone())),
         ));
 
         let iam = iam::Services::new(database.clone(), tx.clone());
+        let schema = schema::Services::new(database.clone());
 
         Ok(Self {
             config: Arc::new(config),
@@ -59,6 +59,7 @@ impl Provider {
             auth,
             rbac,
             iam,
+            schema,
         })
     }
 }
