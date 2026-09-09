@@ -9,6 +9,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .file_descriptor_set_path(&descriptor)
         .compile_protos(
             &[
+                "proto/schemaforge/v1/auth.proto",
                 "proto/schemaforge/v1/schema.proto",
                 "proto/schemaforge/v1/health.proto",
             ],

@@ -162,6 +162,7 @@ written twice. `src/rpc.rs` is where the generated module is included.
 | Service         | Methods                                                     |
 | --------------- | ----------------------------------------------------------- |
 | `HealthService` | `Check`                                                      |
+| `AuthService`   | `Login`, `RefreshToken`                                      |
 | `SchemaService` | `CreateSchema`, `GetSchema`, `ListSchemas`, `UpdateSchema`, `DeleteSchema`, `ValidateSchema`, `GenerateDdl` |
 
 The two transports share everything below the adapter. `SchemaService` in
@@ -171,6 +172,30 @@ both at once. Only the mapping differs: `adapter/handler/` maps JSON and
 
 There is no gRPC-web layer. The frontend server calls this port over native
 gRPC and the browser talks JSON to `APP_PORT`.
+
+### Who may call what
+
+`HealthService`, `AuthService` and reflection are open. Everything on
+`SchemaService` needs an access token in `authorization` metadata and the
+permission for the method:
+
+| Method                                                     | Permission         |
+| ---------------------------------------------------------- | ------------------ |
+| `GetSchema`, `ListSchemas`, `ValidateSchema`, `GenerateDdl` | `Schemas.View All` |
+| `CreateSchema`                                              | `Schemas.Create`   |
+| `UpdateSchema`                                              | `Schemas.Update`   |
+| `DeleteSchema`                                              | `Schemas.Delete`   |
+
+`AuthLayer` in `src/server/middlewares/rpc_auth.rs` is where that happens. It
+goes through the same `Auth` and `Engine` the HTTP middleware uses, so a token
+and a permission mean the same thing on either port, and it refuses a call
+before the handler runs rather than inside it. gRPC has no route table to hang
+a guard on, so the method path is the route and `access_for` is the table. A
+method added to `SchemaService` and left off it answers denied.
+
+Note the asymmetry while it lasts: the same schema operations over HTTP are
+still open, so the gRPC check is a policy for the frontend server rather than
+a lock on the data.
 
 `errdef::Error` renders as a `tonic::Status` the same way it renders as an
 HTTP response. The transport carries only a coarse code and a string, so the
@@ -274,7 +299,7 @@ Three layers, all runnable with one command each:
 | ------------------------------------ | --------------------------------- | ---------------- |
 | Unit tests, fakes for the boundaries  | `#[cfg(test)]` next to the code    | no               |
 | HTTP tests through the real router    | `tests/auth_routes.rs`, `tests/iam_routes.rs`, `tests/schema_routes.rs` | no |
-| gRPC tests through a real socket      | `tests/schema_rpc.rs`             | no               |
+| gRPC tests through a real socket      | `tests/schema_rpc.rs`, `tests/auth_rpc.rs` | no      |
 | Repository, transaction and RBAC tests | `tests/postgres.rs`               | yes              |
 
 `tests/support/mod.rs` holds the fakes that stand in for the auth, RBAC, user
@@ -285,6 +310,8 @@ protobuf mapping, and the store itself is covered in `tests/postgres.rs`.
 
 `tests/schema_rpc.rs` starts a tonic server on port 0 and talks to it with the
 generated client, so it exercises the wire rather than the handler in process.
+That server carries the same layers the real one does, and its client sends a
+token, which is what `tests/auth_rpc.rs` takes away to check the refusals.
 
 `tests/postgres.rs` **skips itself** unless `TEST_DATABASE_URL` is set, which
 keeps `cargo test` green on a bare checkout. An empty database is enough,

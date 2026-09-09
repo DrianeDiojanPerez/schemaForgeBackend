@@ -6,8 +6,9 @@ use tonic::transport::Server;
 use tower_http::sensitive_headers::SetSensitiveRequestHeadersLayer;
 
 use crate::config::{AppConfig, Deployment};
-use crate::module::{health, schema};
+use crate::module::{auth, health, schema};
 use crate::rpc::v1;
+use crate::server::middlewares::rpc_auth::AuthLayer;
 use crate::server::middlewares::rpc_context::RequestContextLayer;
 use crate::server::Modules;
 
@@ -16,6 +17,7 @@ use crate::server::Modules;
 fn mount(modules: &Modules) -> Routes {
     Routes::default()
         .add_service(health::service())
+        .add_service(auth::service(modules.auth.clone()))
         .add_service(schema::service(&modules.schema))
 }
 
@@ -55,6 +57,7 @@ pub async fn serve(
             header::AUTHORIZATION,
         ]))
         .layer(RequestContextLayer)
+        .layer(AuthLayer::new(modules.auth.clone(), modules.rbac.clone()))
         .add_routes(routes)
         .serve_with_shutdown(addr, shutdown)
         .await?;
