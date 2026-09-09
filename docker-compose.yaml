@@ -2,7 +2,7 @@ services:
   # ──── Global Containers ──────────────────────────────────
   mail:
     image: mailhog/mailhog
-    container_name: api-starter-mail
+    container_name: schemaforge-mail
     profiles: ["dev", "uat"]
     ports:
       - "8025:8025"
@@ -11,7 +11,7 @@ services:
       - isolated
   database:
     image: postgres:latest
-    container_name: api-starter-db
+    container_name: schemaforge-db
     profiles: ["dev", "uat"]
     environment:
       POSTGRES_USER: ${DB_USERNAME}
@@ -40,7 +40,7 @@ services:
   # ──── Dev ──────────────────────────────────
   dev:
     profiles: ["dev"]
-    container_name: api-starter-api-dev
+    container_name: schemaforge-api-dev
     build:
       context: .
       target: development
@@ -58,6 +58,7 @@ services:
       - target-cache:/app/target
     ports:
       - "${APP_PORT}:${APP_PORT}"
+      - "${GRPC_PORT}:${GRPC_PORT}"
     depends_on:
       mail:
         condition: service_started
@@ -69,7 +70,7 @@ services:
   # ──── Uat ──────────────────────────────────
   uat:
     profiles: ["uat"]
-    container_name: api-starter-api-uat
+    container_name: schemaforge-api-uat
     build:
       context: .
       target: production
@@ -81,9 +82,10 @@ services:
       MAIL_HOST: mail
     ports:
       - "${APP_PORT}:${APP_PORT}"
+      - "${GRPC_PORT}:${GRPC_PORT}"
     restart: unless-stopped
     volumes:
-      - /var/log/uat_api_starter:/app/storage/logs
+      - /var/log/uat_schemaforge:/app/storage/logs
     depends_on:
       mail:
         condition: service_started
@@ -95,7 +97,7 @@ services:
   # ──── Prod ──────────────────────────────────
   prod:
     profiles: ["prod"]
-    container_name: api-starter-api-prod
+    container_name: schemaforge-api-prod
     build:
       context: .
       target: production
@@ -103,9 +105,10 @@ services:
       - .env
     ports:
       - "${APP_PORT}:${APP_PORT}"
+      - "${GRPC_PORT}:${GRPC_PORT}"
     restart: unless-stopped
     volumes:
-      - /var/log/api_starter:/app/storage/logs
+      - /var/log/schemaforge:/app/storage/logs
     networks:
       - isolated
       - shared
@@ -117,4 +120,4 @@ networks:
   isolated:
   shared:
     external: true
-    name: api-starter-bridge
+    name: schemaforge-bridge
