@@ -1,8 +1,9 @@
 use std::net::SocketAddr;
 
+use axum::http::header;
 use tonic::service::Routes;
 use tonic::transport::Server;
-use tower_http::trace::TraceLayer;
+use tower_http::sensitive_headers::SetSensitiveRequestHeadersLayer;
 
 use crate::config::{AppConfig, Deployment};
 use crate::module::{health, schema};
@@ -50,7 +51,9 @@ pub async fn serve(
     tracing::info!(%addr, "grpc server listening");
 
     Server::builder()
-        .layer(TraceLayer::new_for_grpc())
+        .layer(SetSensitiveRequestHeadersLayer::new([
+            header::AUTHORIZATION,
+        ]))
         .layer(RequestContextLayer)
         .add_routes(routes)
         .serve_with_shutdown(addr, shutdown)

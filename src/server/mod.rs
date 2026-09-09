@@ -11,7 +11,6 @@ use axum::{middleware, Router};
 use tower_http::cors::CorsLayer;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::sensitive_headers::SetSensitiveRequestHeadersLayer;
-use tower_http::trace::TraceLayer;
 
 use crate::module::{iam, schema};
 use crate::package::auth::Auth;
@@ -43,7 +42,6 @@ pub fn router(modules: &Modules) -> Router {
         .layer(middleware::from_fn(
             middlewares::request_context::request_context,
         ))
-        .layer(TraceLayer::new_for_http())
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
         .layer(SetSensitiveRequestHeadersLayer::new([

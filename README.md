@@ -410,11 +410,30 @@ Compose profiles: `dev`, `uat`, `prod`, `test`.
 
 Structured JSON is written to a daily rotated file under `LOGGER_DIRECTORY`
 (`storage/logs/log.<date>.log`) and, outside production, to stdout. Every log
-line inside a request carries `route_path`, `request_id`, `ip_address` and
-`method`.
+line inside an HTTP request carries `route_path`, `request_id`, `ip_address`
+and `method`; a gRPC call carries `request_id` and `path`.
+
+Both ports log the call on the way in and on the way out, and both use the
+same levels:
+
+| Line              | Level | Carries                                   |
+| ----------------- | ----- | ----------------------------------------- |
+| `request started` | debug | method, uri, query, request headers       |
+| `request completed`| debug| status, latency, response headers         |
+| `request rejected`| warn  | a 4xx status and the latency              |
+| `request failed`  | error | a 5xx status and the latency              |
+| `rpc started`     | debug | the call metadata                         |
+| `rpc completed`   | debug | latency                                   |
+| `rpc rejected`    | warn  | a client `grpc-status` and the latency    |
+| `rpc failed`      | error | `grpc-status` 2, 13, 14 or 15             |
+
+`Authorization` is marked sensitive on both ports, so it prints as `Sensitive`
+rather than as the token.
 
 `LOGGER_LEVEL` takes one of `trace|debug|info|warn|error` and defaults to
-`info`. `RUST_LOG` overrides it when set, and accepts the full tracing filter
+`info`; `.env.example` ships `debug` so the request lines are visible while
+the frontend is being written. At `info` only the rejections and failures
+survive. `RUST_LOG` overrides it when set, and accepts the full tracing filter
 syntax.
 
 `APP_ENVIRONMENT` takes one of `local|development|production` and defaults to

@@ -28,6 +28,7 @@ pub async fn request_context(request: Request, next: Next) -> Response {
 
     let method = request.method().clone();
     let uri = request.uri().path().to_owned();
+    let query = request.uri().query().unwrap_or_default().to_owned();
 
     let span = tracing::info_span!(
         "request",
@@ -38,7 +39,15 @@ pub async fn request_context(request: Request, next: Next) -> Response {
     );
 
     async move {
-        tracing::info!(method = %method, uri = %uri, "request started");
+        // The authorization header is marked sensitive by the layer above, so
+        // its value prints as `Sensitive` rather than as the token.
+        tracing::debug!(
+            method = %method,
+            uri = %uri,
+            query = %query,
+            headers = ?request.headers(),
+            "request started"
+        );
 
         let started = Instant::now();
         let response = next.run(request).await;
@@ -57,12 +66,21 @@ pub async fn request_context(request: Request, next: Next) -> Response {
                 latency_ms,
                 "request failed"
             );
-        } else {
-            tracing::info!(
+        } else if status.is_client_error() {
+            tracing::warn!(
                 method = %method,
                 uri = %uri,
                 status = status.as_u16(),
                 latency_ms,
+                "request rejected"
+            );
+        } else {
+            tracing::debug!(
+                method = %method,
+                uri = %uri,
+                status = status.as_u16(),
+                latency_ms,
+                headers = ?response.headers(),
                 "request completed"
             );
         }
