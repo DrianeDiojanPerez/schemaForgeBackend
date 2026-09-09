@@ -4,6 +4,7 @@ use std::str::FromStr;
 #[derive(Debug, Clone)]
 pub struct Server {
     pub port: u16,
+    pub grpc_port: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

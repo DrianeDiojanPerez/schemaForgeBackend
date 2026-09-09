@@ -3,6 +3,7 @@ mod db;
 mod jwt;
 mod logger;
 mod mail;
+mod rbac;
 mod server;
 
 pub use auth::Auth;
@@ -10,6 +11,7 @@ pub use db::Db;
 pub use jwt::Jwt;
 pub use logger::{LogLevel, Logger};
 pub use mail::Mail;
+pub use rbac::Rbac;
 pub use server::{Deployment, Environment, Server};
 
 use crate::package::env;
@@ -25,6 +27,7 @@ pub struct AppConfig {
     pub mail: Mail,
     pub jwt: Jwt,
     pub auth: Auth,
+    pub rbac: Rbac,
 }
 
 impl AppConfig {
@@ -41,12 +44,14 @@ impl AppConfig {
             mail: Self::load_mail()?,
             jwt: Self::load_jwt()?,
             auth: Self::load_auth()?,
+            rbac: Self::load_rbac()?,
         })
     }
 
     fn load_server() -> Result<Server, ConfigError> {
         Ok(Server {
             port: env::u16_or("APP_PORT", 3000)?,
+            grpc_port: env::u16_or("GRPC_PORT", 50051)?,
         })
     }
 
@@ -59,7 +64,7 @@ impl AppConfig {
 
     fn load_deployment() -> Result<Deployment, ConfigError> {
         Ok(Deployment {
-            name: env::string_or("APP_NAME", "App_sample"),
+            name: env::string_or("APP_NAME", "SchemaForgeBackend"),
             environment: env::variant_or_default("APP_ENVIRONMENT")?,
             time_zone: env::string_or("APP_TIMEZONE", "America/Belize"),
         })
@@ -69,7 +74,7 @@ impl AppConfig {
         Ok(Db {
             host: env::string_or("DB_HOST", "127.0.0.1"),
             port: env::u16_or("DB_PORT", 5432)?,
-            database: env::string_or("DB_DATABASE", "api_starter"),
+            database: env::string_or("DB_DATABASE", "schemaforge"),
             username: env::string_or("DB_USERNAME", "root"),
             password: env::string_or("DB_PASSWORD", "password"),
             max_connections: env::u32_or("DB_MAX_CONNECTIONS", 10)?,
@@ -104,6 +109,12 @@ impl AppConfig {
             )?,
         })
     }
+
+    fn load_rbac() -> Result<Rbac, ConfigError> {
+        Ok(Rbac {
+            super_role: env::string_or("SUPER_ROLE", "Admin"),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -115,7 +126,7 @@ mod tests {
         let db = Db {
             host: "database".to_owned(),
             port: 5432,
-            database: "api_starter".to_owned(),
+            database: "schemaforge".to_owned(),
             username: "postgres".to_owned(),
             password: "password".to_owned(),
             max_connections: 10,
@@ -124,7 +135,7 @@ mod tests {
 
         assert_eq!(
             db.to_url(),
-            "postgres://postgres:password@database:5432/api_starter"
+            "postgres://postgres:password@database:5432/schemaforge"
         );
     }
 
@@ -133,7 +144,7 @@ mod tests {
         let db = Db {
             host: "database".to_owned(),
             port: 5432,
-            database: "api_starter".to_owned(),
+            database: "schemaforge".to_owned(),
             username: "user@corp".to_owned(),
             password: "p@ss:w/rd?#".to_owned(),
             max_connections: 10,
@@ -142,7 +153,7 @@ mod tests {
 
         assert_eq!(
             db.to_url(),
-            "postgres://user%40corp:p%40ss%3Aw%2Frd%3F%23@database:5432/api_starter"
+            "postgres://user%40corp:p%40ss%3Aw%2Frd%3F%23@database:5432/schemaforge"
         );
     }
 
@@ -151,7 +162,7 @@ mod tests {
         let db = Db {
             host: "database".to_owned(),
             port: 5432,
-            database: "api_starter".to_owned(),
+            database: "schemaforge".to_owned(),
             username: "postgres".to_owned(),
             password: "hunter2".to_owned(),
             max_connections: 10,
@@ -177,7 +188,7 @@ mod tests {
     #[test]
     fn only_production_disables_the_stdout_logger() {
         let deployment = |environment: Environment| Deployment {
-            name: "App_sample".to_owned(),
+            name: "SchemaForgeBackend".to_owned(),
             environment,
             time_zone: "America/Belize".to_owned(),
         };
