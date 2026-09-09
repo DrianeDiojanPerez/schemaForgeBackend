@@ -20,8 +20,8 @@ check: fmt lint test
 
 # ──── Containers ──────────────────────────────────
 network:
-	@docker network inspect api-starter-bridge >/dev/null 2>&1 \
-		|| docker network create api-starter-bridge
+	@docker network inspect schemaforge-bridge >/dev/null 2>&1 \
+		|| docker network create schemaforge-bridge
 up: network
 	@docker compose --profile dev up --build
 down:

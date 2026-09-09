@@ -1,4 +1,5 @@
 mod docs;
+mod grpc;
 pub mod middlewares;
 mod mount;
 
@@ -12,7 +13,7 @@ use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetReques
 use tower_http::sensitive_headers::SetSensitiveRequestHeadersLayer;
 use tower_http::trace::TraceLayer;
 
-use crate::module::iam;
+use crate::module::{iam, schema};
 use crate::package::auth::Auth;
 use crate::package::errdef::Error;
 use crate::package::rbac::Engine;
@@ -22,6 +23,7 @@ pub struct Modules {
     pub auth: Arc<dyn Auth>,
     pub rbac: Arc<dyn Engine>,
     pub iam: iam::Services,
+    pub schema: schema::Services,
 }
 
 impl From<&Provider> for Modules {
@@ -30,6 +32,7 @@ impl From<&Provider> for Modules {
             auth: provider.auth.clone(),
             rbac: provider.rbac.clone(),
             iam: provider.iam.clone(),
+            schema: provider.schema.clone(),
         }
     }
 }
@@ -53,9 +56,23 @@ async fn route_not_found() -> Error {
     Error::not_found("route not found")
 }
 
+/// The browser talks JSON to the HTTP port and the frontend server talks gRPC
+/// to the other one, so both listeners run off the same modules and stop on
+/// the same signal.
 pub async fn serve(provider: Provider) -> anyhow::Result<()> {
+    let modules = Modules::from(&provider);
+
+    tokio::try_join!(
+        serve_http(&provider, &modules),
+        grpc::serve(&provider.config, &modules, shutdown_signal()),
+    )?;
+
+    Ok(())
+}
+
+async fn serve_http(provider: &Provider, modules: &Modules) -> anyhow::Result<()> {
     let addr = SocketAddr::from(([0, 0, 0, 0], provider.config.server.port));
-    let app = router(&Modules::from(&provider));
+    let app = router(modules);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
 

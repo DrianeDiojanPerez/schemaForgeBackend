@@ -1,8 +1,8 @@
-use api_starter::config::AppConfig;
-use api_starter::database::{migrations, Database};
-use api_starter::package::logger;
-use api_starter::provider::Provider;
-use api_starter::server;
+use schemaforge_backend::config::AppConfig;
+use schemaforge_backend::database::{migrations, Database};
+use schemaforge_backend::package::logger;
+use schemaforge_backend::provider::Provider;
+use schemaforge_backend::server;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -26,7 +26,7 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
     tracing::info!(
         environment = %config.deployment.environment,
         port = config.server.port,
-        "starting api starter"
+        "starting schemaforge backend"
     );
 
     let provider = Provider::inject_default(config).await?;

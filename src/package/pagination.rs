@@ -31,6 +31,19 @@ impl Default for ListRequest {
 }
 
 impl ListRequest {
+    /// The same paging rules for a caller that already has the numbers, so a
+    /// transport without a query string clamps identically to one that has.
+    pub fn paged(page: i64, per_page: i64) -> Self {
+        let mut request = ListRequest {
+            page,
+            per_page,
+            ..Default::default()
+        };
+
+        request.normalize();
+        request
+    }
+
     pub fn from_query(query: &str) -> Self {
         let pairs: Vec<(String, String)> = serde_urlencoded::from_str(query).unwrap_or_default();
 

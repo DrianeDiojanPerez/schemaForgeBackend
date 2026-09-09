@@ -8,7 +8,10 @@ pub struct ModuleMigrations {
 /// Order matters once a module references another's tables, so a new module
 /// goes after the ones it depends on.
 pub fn all() -> Vec<ModuleMigrations> {
-    vec![module("iam", sqlx::migrate!("./migrations/iam"))]
+    vec![
+        module("iam", sqlx::migrate!("./migrations/iam")),
+        module("schema", sqlx::migrate!("./migrations/schema")),
+    ]
 }
 
 pub fn find(name: &str) -> Option<ModuleMigrations> {
@@ -42,6 +45,7 @@ mod tests {
 
         assert_eq!(names.len(), count, "a module is registered twice");
         assert!(names.contains(&"iam"));
+        assert!(names.contains(&"schema"));
     }
 
     /// A reversible migration is two entries under one version, so only the
@@ -71,6 +75,7 @@ mod tests {
     #[test]
     fn finds_a_module_by_name() {
         assert!(find("iam").is_some());
+        assert!(find("schema").is_some());
         assert!(find("nope").is_none());
     }
 
@@ -80,6 +85,14 @@ mod tests {
 
         assert_eq!(up_versions(&iam).len(), 11);
         assert!(iam.migrator.iter().all(|m| !m.sql.is_empty()));
+    }
+
+    #[test]
+    fn the_schema_module_carries_its_migrations() {
+        let schema = find("schema").expect("schema should be registered");
+
+        assert_eq!(up_versions(&schema).len(), 2);
+        assert!(schema.migrator.iter().all(|m| !m.sql.is_empty()));
     }
 
     #[test]

@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package schemaforge.v1;
+
+message CheckRequest {}
+
+message CheckResponse {
+  string status = 1;
+  string version = 2;
+}
+
+service HealthService {
+  // Liveness only. It answers as long as the process is serving, which is what
+  // a container orchestrator restarts on. It deliberately does not touch any
+  // store, so a slow dependency cannot get the whole service killed.
+  rpc Check(CheckRequest) returns (CheckResponse);
+}

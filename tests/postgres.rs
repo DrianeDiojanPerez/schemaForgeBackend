@@ -4,19 +4,29 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use api_starter::database::{Database, TxManager};
-use api_starter::module::iam::adapter::repository::{PgPermissionRepository, PgUserRepository};
-use api_starter::module::iam::core::domain::{
+use schemaforge_backend::database::{Database, TxManager};
+use schemaforge_backend::module::iam::adapter::repository::{
+    PgPermissionRepository, PgUserRepository,
+};
+use schemaforge_backend::module::iam::core::domain::{
     CreateUser, DomainError, ACTIVE_USER_STATUS, DELETED_USER_STATUS,
 };
-use api_starter::module::iam::core::ports::{
+use schemaforge_backend::module::iam::core::ports::{
     PermissionRepository, UpdateUser, UserRepository, UserService,
 };
-use api_starter::module::iam::core::service::UserServiceImpl;
-use api_starter::package::auth::{PostgresAuthStore, Store as AuthStore};
-use api_starter::package::crypto;
-use api_starter::package::pagination::ListRequest;
-use api_starter::package::rbac::{Engine, PostgresRbacStore, RbacEngine, Store as RbacStore};
+use schemaforge_backend::module::iam::core::service::UserServiceImpl;
+use schemaforge_backend::module::schema::adapter::repository::PgSchemaRepository;
+use schemaforge_backend::module::schema::core::domain::{
+    Attribute, Cardinality, DataType, DataTypeKind, DomainError as SchemaError, Entity,
+    ForeignKeyRef, Position, Relationship, SchemaDraft, SchemaSummary,
+};
+use schemaforge_backend::module::schema::core::ports::SchemaRepository;
+use schemaforge_backend::package::auth::{PostgresAuthStore, Store as AuthStore};
+use schemaforge_backend::package::crypto;
+use schemaforge_backend::package::pagination::ListRequest;
+use schemaforge_backend::package::rbac::{
+    Engine, PostgresRbacStore, RbacEngine, Store as RbacStore,
+};
 
 /// Each test gets its own pool: `#[tokio::test]` builds a runtime per test,
 /// and a sqlx pool cannot outlive the runtime that created it. Migrating is
@@ -55,6 +65,7 @@ struct Fixture {
     db: Arc<Database>,
     users: PgUserRepository,
     permissions: PgPermissionRepository,
+    schemas: PgSchemaRepository,
     tag: String,
 }
 
@@ -65,6 +76,7 @@ impl Fixture {
         Self {
             users: PgUserRepository::new(db.clone()),
             permissions: PgPermissionRepository::new(db.clone()),
+            schemas: PgSchemaRepository::new(db.clone()),
             tag: Uuid::new_v4().simple().to_string()[..12].to_owned(),
             db,
         }
@@ -890,4 +902,327 @@ async fn a_role_without_permissions_lists_nothing() {
         .expect("the listing should succeed");
 
     assert!(permissions.is_empty());
+}
+
+// ──── Schema repository ──────────────────────────────────
+
+impl Fixture {
+    fn a_new_schema(&self, name: &str) -> SchemaDraft {
+        SchemaDraft {
+            name: format!("{name}_{}", self.tag),
+            description: "A course registration model".to_owned(),
+            entities: vec![
+                Entity::new("e1", "students")
+                    .with_description("Everyone enrolled")
+                    .with_position(Position::new(40.0, -120.5))
+                    .with_attributes(vec![Attribute::new(
+                        "a1",
+                        "id",
+                        DataType::simple(DataTypeKind::Uuid),
+                    )
+                    .as_primary_key()]),
+                Entity::new("e2", "registrations").with_attributes(vec![
+                    Attribute::new("a2", "id", DataType::simple(DataTypeKind::Uuid))
+                        .as_primary_key(),
+                    Attribute::new("a3", "student_id", DataType::simple(DataTypeKind::Uuid))
+                        .required()
+                        .referencing(ForeignKeyRef::new("e1", "a1")),
+                    Attribute::new(
+                        "a4",
+                        "grade",
+                        DataType {
+                            kind: DataTypeKind::Numeric,
+                            length: None,
+                            precision: Some(4),
+                            scale: Some(2),
+                        },
+                    )
+                    .with_description("Final mark")
+                    .with_default("0.00"),
+                ]),
+            ],
+            relationships: vec![Relationship::new(
+                "r1",
+                ("e2", "a3"),
+                ("e1", "a1"),
+                Cardinality::OneToMany,
+            )
+            .with_name("registered_student")],
+        }
+    }
+
+    /// The table is shared with whatever else is running, and a listing has no
+    /// filter, so a schema is located by walking the pages rather than by
+    /// assuming it landed on the first one.
+    async fn find_summary(&self, name: &str) -> Option<SchemaSummary> {
+        let mut page = 1;
+
+        loop {
+            let (summaries, total) = self
+                .schemas
+                .index(&ListRequest::from_query(&format!(
+                    "page={page}&per_page=50"
+                )))
+                .await
+                .expect("the listing should succeed");
+
+            if let Some(found) = summaries.iter().find(|s| s.name == name) {
+                return Some(found.clone());
+            }
+
+            if summaries.is_empty() || page * 50 >= total {
+                return None;
+            }
+
+            page += 1;
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_created_schema_comes_back_with_every_part_of_the_drawing() {
+    let fx = database!();
+
+    let draft = fx.a_new_schema("round_trip");
+    let created = fx
+        .schemas
+        .create(draft.clone())
+        .await
+        .expect("the insert should succeed");
+
+    let found = fx
+        .schemas
+        .find_by_id(&created.id)
+        .await
+        .expect("the lookup should succeed")
+        .expect("the schema should exist");
+
+    assert_eq!(found.name, draft.name);
+    assert_eq!(found.description, draft.description);
+    assert_eq!(
+        found.entities, draft.entities,
+        "positions, descriptions, keys and foreign keys all survive the store"
+    );
+    assert_eq!(found.relationships, draft.relationships);
+    assert_eq!(found.created_at, created.created_at);
+}
+
+#[tokio::test]
+async fn a_duplicate_schema_name_is_refused_regardless_of_case() {
+    let fx = database!();
+
+    let draft = fx.a_new_schema("duplicate");
+    fx.schemas
+        .create(draft.clone())
+        .await
+        .expect("the first insert should succeed");
+
+    let shouted = SchemaDraft {
+        name: draft.name.to_uppercase(),
+        ..draft
+    };
+
+    assert!(matches!(
+        fx.schemas
+            .create(shouted)
+            .await
+            .expect_err("the second insert should fail"),
+        SchemaError::DuplicateSchemaName(_)
+    ));
+}
+
+#[tokio::test]
+async fn finds_a_schema_by_name_regardless_of_case() {
+    let fx = database!();
+
+    let draft = fx.a_new_schema("by_name");
+    let created = fx
+        .schemas
+        .create(draft.clone())
+        .await
+        .expect("the insert should succeed");
+
+    let found = fx
+        .schemas
+        .find_by_name(&draft.name.to_uppercase())
+        .await
+        .expect("the lookup should succeed")
+        .expect("the schema should exist");
+
+    assert_eq!(found.id, created.id);
+}
+
+#[tokio::test]
+async fn replacing_a_schema_keeps_its_id_and_its_creation_time() {
+    let fx = database!();
+
+    let created = fx
+        .schemas
+        .create(fx.a_new_schema("replace"))
+        .await
+        .expect("the insert should succeed");
+
+    let mut draft = fx.a_new_schema("replace");
+    draft.description = "Now with a second campus".to_owned();
+    draft.entities.truncate(1);
+    draft.relationships.clear();
+
+    let replaced = fx
+        .schemas
+        .replace(&created.id, draft)
+        .await
+        .expect("the update should succeed");
+
+    assert_eq!(replaced.id, created.id);
+    assert_eq!(replaced.created_at, created.created_at);
+    assert!(replaced.updated_at >= created.updated_at);
+    assert_eq!(replaced.description, "Now with a second campus");
+    assert_eq!(replaced.entities.len(), 1);
+    assert!(replaced.relationships.is_empty());
+}
+
+#[tokio::test]
+async fn renaming_onto_another_schemas_name_is_refused() {
+    let fx = database!();
+
+    let taken = fx.a_new_schema("rename_target");
+    fx.schemas
+        .create(taken.clone())
+        .await
+        .expect("the first insert should succeed");
+
+    let other = fx
+        .schemas
+        .create(fx.a_new_schema("rename_source"))
+        .await
+        .expect("the second insert should succeed");
+
+    assert!(matches!(
+        fx.schemas
+            .replace(&other.id, taken)
+            .await
+            .expect_err("the rename should fail"),
+        SchemaError::DuplicateSchemaName(_)
+    ));
+}
+
+#[tokio::test]
+async fn a_missing_schema_is_none_rather_than_an_error() {
+    let fx = database!();
+
+    assert!(fx
+        .schemas
+        .find_by_id(&Uuid::new_v4().to_string())
+        .await
+        .expect("the lookup should succeed")
+        .is_none());
+
+    // An id the store could never have handed out reads as missing rather
+    // than as a different kind of failure the caller has to tell apart.
+    assert!(fx
+        .schemas
+        .find_by_id("not-a-uuid")
+        .await
+        .expect("the lookup should succeed")
+        .is_none());
+}
+
+#[tokio::test]
+async fn replacing_or_deleting_a_missing_schema_reports_it_missing() {
+    let fx = database!();
+
+    let absent = Uuid::new_v4().to_string();
+
+    assert!(matches!(
+        fx.schemas
+            .replace(&absent, fx.a_new_schema("absent"))
+            .await
+            .expect_err("the update should fail"),
+        SchemaError::SchemaNotFound
+    ));
+
+    assert!(matches!(
+        fx.schemas
+            .delete(&absent)
+            .await
+            .expect_err("the delete should fail"),
+        SchemaError::SchemaNotFound
+    ));
+}
+
+#[tokio::test]
+async fn deleting_twice_reports_the_second_as_missing() {
+    let fx = database!();
+
+    let created = fx
+        .schemas
+        .create(fx.a_new_schema("delete"))
+        .await
+        .expect("the insert should succeed");
+
+    fx.schemas
+        .delete(&created.id)
+        .await
+        .expect("the first delete should succeed");
+
+    assert!(matches!(
+        fx.schemas
+            .delete(&created.id)
+            .await
+            .expect_err("the second delete should fail"),
+        SchemaError::SchemaNotFound
+    ));
+}
+
+#[tokio::test]
+async fn a_listing_counts_the_drawing_without_returning_it() {
+    let fx = database!();
+
+    let draft = fx.a_new_schema("listing");
+    fx.schemas
+        .create(draft.clone())
+        .await
+        .expect("the insert should succeed");
+
+    let summary = fx
+        .find_summary(&draft.name)
+        .await
+        .expect("the schema should be listed");
+
+    assert_eq!(summary.entity_count, 2);
+    assert_eq!(summary.relationship_count, 1);
+}
+
+#[tokio::test]
+async fn a_listing_never_returns_more_than_a_page() {
+    let fx = database!();
+
+    for index in 0..3 {
+        fx.schemas
+            .create(fx.a_new_schema(&format!("page_{index}")))
+            .await
+            .expect("the insert should succeed");
+    }
+
+    let (summaries, total) = fx
+        .schemas
+        .index(&ListRequest::from_query("page=1&per_page=2"))
+        .await
+        .expect("the listing should succeed");
+
+    assert_eq!(summaries.len(), 2);
+    assert!(total >= 3);
+}
+
+#[tokio::test]
+async fn a_page_past_the_end_is_empty_rather_than_an_error() {
+    let fx = database!();
+
+    let (summaries, _) = fx
+        .schemas
+        .index(&ListRequest::from_query("page=100000&per_page=10"))
+        .await
+        .expect("the listing should succeed");
+
+    assert!(summaries.is_empty());
 }

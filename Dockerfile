@@ -5,9 +5,17 @@ WORKDIR /app
 
 ENV CARGO_TERM_COLOR=always
 
+# The build script compiles the proto contract, so protoc has to be here
+# before anything is built.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
 # Dependency layer: only the manifests, so a source change does not rebuild
-# the whole dependency tree.
-COPY Cargo.toml Cargo.lock ./
+# the whole dependency tree. The build script and the contract come with them,
+# since cargo runs the script before it will build anything.
+COPY Cargo.toml Cargo.lock build.rs ./
+COPY proto ./proto
 RUN mkdir -p src && echo "fn main() {}" > src/main.rs \
     && cargo build --release \
     && rm -rf src
@@ -72,6 +80,6 @@ RUN mkdir -p /app/storage/logs && chown -R appuser:appuser /app
 
 USER appuser
 
-EXPOSE 3000
+EXPOSE 3000 50051
 
 CMD ["server"]

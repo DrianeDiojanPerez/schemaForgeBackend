@@ -3,6 +3,7 @@ use std::fmt;
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use tonic::{Code, Status};
 
 use crate::package::response;
 
@@ -14,7 +15,29 @@ pub mod code {
     pub const RESOURCE_CONFLICT: i32 = 1004;
     pub const UNPROCESSABLE: i32 = 1005;
     pub const FORBIDDEN: i32 = 1006;
+    pub const UNIMPLEMENTED: i32 = 1007;
     pub const UNKNOWN: i32 = 2000;
+}
+
+/// The transport only carries a coarse code and a string, so the structured
+/// part of an error rides in metadata and the caller rebuilds it there.
+pub mod metadata {
+    pub const APP_CODE: &str = "x-app-code";
+    pub const VIOLATIONS: &str = "x-validation-violations";
+}
+
+fn transport_code_for(code: i32) -> Code {
+    match code {
+        code::NOT_FOUND => Code::NotFound,
+        code::UNAUTHORIZED => Code::Unauthenticated,
+        code::BAD_REQUEST => Code::InvalidArgument,
+        code::RESOURCE_CONFLICT => Code::AlreadyExists,
+        code::UNPROCESSABLE | code::VALIDATION_FAILED => Code::InvalidArgument,
+        code::FORBIDDEN => Code::PermissionDenied,
+        code::UNIMPLEMENTED => Code::Unimplemented,
+        code::UNKNOWN => Code::Internal,
+        _ => Code::InvalidArgument,
+    }
 }
 
 fn status_for(code: i32) -> StatusCode {
@@ -25,6 +48,7 @@ fn status_for(code: i32) -> StatusCode {
         code::RESOURCE_CONFLICT => StatusCode::CONFLICT,
         code::UNPROCESSABLE => StatusCode::UNPROCESSABLE_ENTITY,
         code::FORBIDDEN => StatusCode::FORBIDDEN,
+        code::UNIMPLEMENTED => StatusCode::NOT_IMPLEMENTED,
         code::UNKNOWN => StatusCode::INTERNAL_SERVER_ERROR,
         _ => StatusCode::BAD_REQUEST,
     }
@@ -97,6 +121,13 @@ impl Error {
         Self::new(code::FORBIDDEN, message)
     }
 
+    /// For an endpoint whose contract is fixed but whose engine lands in a
+    /// later milestone. The caller gets a status it can act on instead of a
+    /// stub response it might mistake for a result.
+    pub fn unimplemented(message: impl Into<String>) -> Self {
+        Self::new(code::UNIMPLEMENTED, message)
+    }
+
     /// The cause is logged but never returned to the caller.
     pub fn unknown(cause: impl fmt::Display) -> Self {
         Error::App(AppError {
@@ -133,6 +164,22 @@ impl Error {
                 .push(message.into());
         }
     }
+
+    pub fn has_violations(&self) -> bool {
+        match self {
+            Error::Validation(err) => !err.field_violations.is_empty(),
+            Error::App(_) => false,
+        }
+    }
+
+    /// Finer grained than the HTTP status, since several codes render as the
+    /// same status, so a client branches on this instead.
+    pub fn app_code(&self) -> i32 {
+        match self {
+            Error::App(err) => err.code,
+            Error::Validation(_) => code::VALIDATION_FAILED,
+        }
+    }
 }
 
 impl fmt::Display for Error {
@@ -145,6 +192,39 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+impl From<Error> for Status {
+    fn from(error: Error) -> Self {
+        tracing::info!(error = %error, "Error Handler Catch");
+
+        let app_code = error.app_code();
+
+        let mut status = match error {
+            Error::Validation(err) => {
+                let mut status = Status::new(
+                    transport_code_for(code::VALIDATION_FAILED),
+                    err.message.clone(),
+                );
+
+                if let Ok(violations) = serde_json::to_string(&err.field_violations) {
+                    if let Ok(value) = violations.parse() {
+                        status.metadata_mut().insert(metadata::VIOLATIONS, value);
+                    }
+                }
+
+                status
+            }
+            // The cause stays on the log line above and never reaches the wire.
+            Error::App(err) => Status::new(transport_code_for(err.code), err.message),
+        };
+
+        if let Ok(value) = app_code.to_string().parse() {
+            status.metadata_mut().insert(metadata::APP_CODE, value);
+        }
+
+        status
+    }
+}
 
 impl From<sqlx::Error> for Error {
     fn from(err: sqlx::Error) -> Self {

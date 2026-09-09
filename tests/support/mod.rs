@@ -2,27 +2,40 @@
 // would otherwise be reported as dead code.
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Request, Response, StatusCode};
 use axum::Router;
+use chrono::Utc;
 use http_body_util::BodyExt;
 use serde_json::Value;
 use tower::ServiceExt;
 use uuid::Uuid;
 
-use api_starter::module::iam;
-use api_starter::module::iam::core::domain::{
+use schemaforge_backend::module::iam::core::domain::{
     Company, CreateUser, Department, Permission, Role, Status, User,
 };
-use api_starter::module::iam::core::ports::{PermissionService, UpdateUser, UserService};
-use api_starter::package::auth::{Auth, AuthenticationTokens, Identity};
-use api_starter::package::errdef::Error;
-use api_starter::package::pagination::{Data, ListRequest};
-use api_starter::package::rbac::Engine;
-use api_starter::server::{self, Modules};
+use schemaforge_backend::module::iam::core::ports::{PermissionService, UpdateUser, UserService};
+use schemaforge_backend::module::schema::core::domain::{
+    DomainError, Schema, SchemaDraft, SchemaSummary,
+};
+use schemaforge_backend::module::schema::core::ports::SchemaRepository;
+use schemaforge_backend::module::{health, iam, schema};
+use schemaforge_backend::package::auth::{Auth, AuthenticationTokens, Identity};
+use schemaforge_backend::package::errdef::Error;
+use schemaforge_backend::package::pagination::{Data, ListRequest};
+use schemaforge_backend::package::rbac::Engine;
+use schemaforge_backend::rpc::v1::health_service_client::HealthServiceClient;
+use schemaforge_backend::rpc::v1::schema_service_client::SchemaServiceClient;
+use schemaforge_backend::server::{self, Modules};
+use std::net::SocketAddr;
+use std::time::Duration;
+use tokio::net::TcpListener;
+use tokio::task::JoinHandle;
+use tonic::transport::{Channel, Server};
 
 pub const VALID_TOKEN: &str = "a-valid-token";
 
@@ -175,6 +188,100 @@ impl PermissionService for FakePermissionService {
     }
 }
 
+/// The store the transport tests run against. The real one is PostgreSQL, and
+/// these tests are about the JSON and protobuf mapping rather than about
+/// persistence, so they keep their own store instead of needing a database.
+///
+/// Persistence itself is covered in `tests/postgres.rs`.
+#[derive(Default)]
+pub struct FakeSchemaRepository {
+    schemas: Mutex<HashMap<String, Schema>>,
+}
+
+impl FakeSchemaRepository {
+    fn read(&self) -> std::sync::MutexGuard<'_, HashMap<String, Schema>> {
+        self.schemas.lock().expect("the store lock should be sound")
+    }
+
+    fn sorted(schemas: &HashMap<String, Schema>) -> Vec<&Schema> {
+        let mut all: Vec<&Schema> = schemas.values().collect();
+        all.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+        all
+    }
+}
+
+#[async_trait]
+impl SchemaRepository for FakeSchemaRepository {
+    async fn index(&self, request: &ListRequest) -> Result<(Vec<SchemaSummary>, i64), DomainError> {
+        let schemas = self.read();
+        let total = schemas.len() as i64;
+
+        let page = Self::sorted(&schemas)
+            .into_iter()
+            .skip(request.offset() as usize)
+            .take(request.per_page as usize)
+            .map(Schema::summary)
+            .collect();
+
+        Ok((page, total))
+    }
+
+    async fn create(&self, draft: SchemaDraft) -> Result<Schema, DomainError> {
+        let mut schemas = self.read();
+
+        if schemas
+            .values()
+            .any(|schema| schema.name.eq_ignore_ascii_case(&draft.name))
+        {
+            return Err(DomainError::DuplicateSchemaName(draft.name));
+        }
+
+        let schema = Schema::new(Uuid::new_v4().to_string(), draft, Utc::now());
+        schemas.insert(schema.id.clone(), schema.clone());
+
+        Ok(schema)
+    }
+
+    async fn find_by_id(&self, id: &str) -> Result<Option<Schema>, DomainError> {
+        Ok(self.read().get(id).cloned())
+    }
+
+    async fn find_by_name(&self, name: &str) -> Result<Option<Schema>, DomainError> {
+        Ok(self
+            .read()
+            .values()
+            .find(|schema| schema.name.eq_ignore_ascii_case(name))
+            .cloned())
+    }
+
+    async fn replace(&self, id: &str, draft: SchemaDraft) -> Result<Schema, DomainError> {
+        let mut schemas = self.read();
+
+        if schemas
+            .values()
+            .any(|schema| schema.id != id && schema.name.eq_ignore_ascii_case(&draft.name))
+        {
+            return Err(DomainError::DuplicateSchemaName(draft.name));
+        }
+
+        let schema = schemas.get_mut(id).ok_or(DomainError::SchemaNotFound)?;
+        schema.replace_with(draft, Utc::now());
+
+        Ok(schema.clone())
+    }
+
+    async fn delete(&self, id: &str) -> Result<(), DomainError> {
+        self.read()
+            .remove(id)
+            .map(|_| ())
+            .ok_or(DomainError::SchemaNotFound)
+    }
+}
+
+pub fn fake_schema_services() -> schema::Services {
+    schema::Services::with_repository(Arc::new(FakeSchemaRepository::default()))
+}
+
 pub struct TestApp {
     pub router: Router,
     pub calls: Arc<Calls>,
@@ -216,6 +323,7 @@ impl TestApp {
                     }],
                 }),
             },
+            schema: fake_schema_services(),
         };
 
         Self {
@@ -288,6 +396,29 @@ impl TestApp {
     ) -> (StatusCode, Value) {
         self.send(authorized(method, uri, VALID_TOKEN, body)).await
     }
+
+    /// Any method, no credentials, for the routes that are not behind the
+    /// authentication layer.
+    pub async fn request(
+        &self,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, Value) {
+        let builder = Request::builder().method(method).uri(uri);
+
+        let request = match body {
+            Some(body) => builder
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("the request should build"),
+            None => builder
+                .body(Body::empty())
+                .expect("the request should build"),
+        };
+
+        self.send(request).await
+    }
 }
 
 pub fn authorized(method: &str, uri: &str, token: &str, body: Option<Value>) -> Request<Body> {
@@ -332,5 +463,62 @@ pub fn a_domain_user() -> User {
             role_id: 3,
             name: "Staff".to_owned(),
         }],
+    }
+}
+
+/// A real server on a real socket, so the gRPC tests exercise the transport
+/// the frontend server will speak rather than calling the handler in process.
+///
+/// Port 0 asks the OS for a free port, which is what lets tests run in
+/// parallel without fighting over one.
+pub struct TestServer {
+    addr: SocketAddr,
+    handle: JoinHandle<()>,
+}
+
+impl TestServer {
+    pub async fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a free port should be available");
+        let addr = listener
+            .local_addr()
+            .expect("the listener should report its address");
+
+        let services = fake_schema_services();
+
+        let handle = tokio::spawn(async move {
+            Server::builder()
+                .add_service(health::service())
+                .add_service(schema::service(&services))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await
+                .expect("the test server should serve");
+        });
+
+        Self { addr, handle }
+    }
+
+    async fn channel(&self) -> Channel {
+        Channel::from_shared(format!("http://{}", self.addr))
+            .expect("the address should be a valid endpoint")
+            .connect_timeout(Duration::from_secs(5))
+            .connect()
+            .await
+            .expect("the test server should accept a connection")
+    }
+
+    pub async fn schema_client(&self) -> SchemaServiceClient<Channel> {
+        SchemaServiceClient::new(self.channel().await)
+    }
+
+    pub async fn health_client(&self) -> HealthServiceClient<Channel> {
+        HealthServiceClient::new(self.channel().await)
+    }
+}
+
+impl Drop for TestServer {
+    fn drop(&mut self) {
+        self.handle.abort();
     }
 }

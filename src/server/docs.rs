@@ -9,7 +9,7 @@ const SPEC: &str = include_str!("openapi.yaml");
 const SCALAR: &str = r##"<!doctype html>
 <html>
   <head>
-    <title>API Starter Reference</title>
+    <title>SchemaForgeBackend Reference</title>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <link rel="icon" href="data:image/svg+xml,
@@ -47,8 +47,8 @@ const SCALAR: &str = r##"<!doctype html>
       data-configuration='{
         "theme": "default",
         "layout": "modern",
-        "title": "API Starter",
-        "slug": "api-starter",
+        "title": "SchemaForgeBackend",
+        "slug": "schemaforge-backend",
 
         "defaultOpenAllTags": true,
         "defaultOpenFirstTag": true,
@@ -134,6 +134,10 @@ mod tests {
             "/v1/users/my-user",
             "/v1/users/{user-id}",
             "/v1/permissions",
+            "/v1/schemas",
+            "/v1/schemas/validate",
+            "/v1/schemas/generate-ddl",
+            "/v1/schemas/{schema-id}",
         ] {
             assert!(
                 SPEC.contains(&format!("\n  {route}:\n")),
@@ -163,7 +167,7 @@ mod tests {
         let config: serde_json::Value = serde_json::from_str(&SCALAR[opening..opening + closing])
             .expect("the configuration should be valid json");
 
-        assert_eq!(config["slug"], "api-starter");
+        assert_eq!(config["slug"], "schemaforge-backend");
         assert_eq!(config["layout"], "modern");
         assert!(config["defaultOpenAllTags"].as_bool().unwrap());
     }
