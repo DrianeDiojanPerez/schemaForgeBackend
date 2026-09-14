@@ -13,8 +13,10 @@ RUN apt-get update \
 
 # Dependency layer: only the manifests, so a source change does not rebuild
 # the whole dependency tree. The build script and the contract come with them,
-# since cargo runs the script before it will build anything.
-COPY Cargo.toml Cargo.lock build.rs ./
+# since cargo runs the script before it will build anything. The toolchain
+# file comes too, so rustup installs it here instead of when the container
+# starts, where it would need the network on every fresh run.
+COPY Cargo.toml Cargo.lock build.rs rust-toolchain.toml ./
 COPY proto ./proto
 RUN mkdir -p src && echo "fn main() {}" > src/main.rs \
     && cargo build --release \
