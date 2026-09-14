@@ -1,0 +1,23 @@
+meta {
+  name: ValidateSchema
+  type: grpc
+  seq: 6
+}
+
+grpc {
+  url: {{grpc_url}}
+  method: /schemaforge.v1.SchemaService/ValidateSchema
+  body: grpc
+  protoPath: ../../../proto/schemaforge/v1/schema.proto
+  auth: inherit
+  methodType: unary
+}
+
+body:grpc {
+  name: message 1
+  content: '''
+    {
+      "id": "{{schema_id}}"
+    }
+  '''
+}

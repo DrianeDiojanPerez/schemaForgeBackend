@@ -1,0 +1,24 @@
+meta {
+  name: ListSchemas
+  type: grpc
+  seq: 3
+}
+
+grpc {
+  url: {{grpc_url}}
+  method: /schemaforge.v1.SchemaService/ListSchemas
+  body: grpc
+  protoPath: ../../../proto/schemaforge/v1/schema.proto
+  auth: inherit
+  methodType: unary
+}
+
+body:grpc {
+  name: message 1
+  content: '''
+    {
+      "page": 1,
+      "per_page": 20
+    }
+  '''
+}

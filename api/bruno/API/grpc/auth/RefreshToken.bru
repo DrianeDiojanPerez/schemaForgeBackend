@@ -1,0 +1,23 @@
+meta {
+  name: RefreshToken
+  type: grpc
+  seq: 2
+}
+
+grpc {
+  url: {{grpc_url}}
+  method: /schemaforge.v1.AuthService/RefreshToken
+  body: grpc
+  protoPath: ../../../proto/schemaforge/v1/auth.proto
+  auth: none
+  methodType: unary
+}
+
+body:grpc {
+  name: message 1
+  content: '''
+    {
+      "refresh_token": "{{refresh_token}}"
+    }
+  '''
+}

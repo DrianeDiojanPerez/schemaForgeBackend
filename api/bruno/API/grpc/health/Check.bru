@@ -1,0 +1,21 @@
+meta {
+  name: Check
+  type: grpc
+  seq: 1
+}
+
+grpc {
+  url: {{grpc_url}}
+  method: /schemaforge.v1.HealthService/Check
+  body: grpc
+  protoPath: ../../../proto/schemaforge/v1/health.proto
+  auth: none
+  methodType: unary
+}
+
+body:grpc {
+  name: message 1
+  content: '''
+    {}
+  '''
+}

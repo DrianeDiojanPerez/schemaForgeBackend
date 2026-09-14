@@ -1,0 +1,23 @@
+meta {
+  name: DeleteSchema
+  type: grpc
+  seq: 5
+}
+
+grpc {
+  url: {{grpc_url}}
+  method: /schemaforge.v1.SchemaService/DeleteSchema
+  body: grpc
+  protoPath: ../../../proto/schemaforge/v1/schema.proto
+  auth: inherit
+  methodType: unary
+}
+
+body:grpc {
+  name: message 1
+  content: '''
+    {
+      "id": "{{schema_id}}"
+    }
+  '''
+}

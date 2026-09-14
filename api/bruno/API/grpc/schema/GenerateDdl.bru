@@ -1,0 +1,25 @@
+meta {
+  name: GenerateDdl
+  type: grpc
+  seq: 7
+}
+
+grpc {
+  url: {{grpc_url}}
+  method: /schemaforge.v1.SchemaService/GenerateDdl
+  body: grpc
+  protoPath: ../../../proto/schemaforge/v1/schema.proto
+  auth: inherit
+  methodType: unary
+}
+
+body:grpc {
+  name: message 1
+  content: '''
+    {
+      "id": "{{schema_id}}",
+      "dialect": "DIALECT_POSTGRES",
+      "include_comments": true
+    }
+  '''
+}

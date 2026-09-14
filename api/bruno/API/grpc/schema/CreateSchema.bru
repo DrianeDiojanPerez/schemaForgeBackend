@@ -1,0 +1,91 @@
+meta {
+  name: CreateSchema
+  type: grpc
+  seq: 1
+}
+
+grpc {
+  url: {{grpc_url}}
+  method: /schemaforge.v1.SchemaService/CreateSchema
+  body: grpc
+  protoPath: ../../../proto/schemaforge/v1/schema.proto
+  auth: inherit
+  methodType: unary
+}
+
+body:grpc {
+  name: message 1
+  content: '''
+    {
+      "name": "Course Registration",
+      "description": "A course registration schema",
+      "entities": [
+        {
+          "id": "e1",
+          "name": "students",
+          "description": "The students table",
+          "position": { "x": 40, "y": 80 },
+          "attributes": [
+            {
+              "id": "a1",
+              "name": "id",
+              "description": "Surrogate key",
+              "data_type": { "kind": "DATA_TYPE_KIND_UUID" },
+              "nullable": false,
+              "primary_key": true,
+              "unique": false
+            },
+            {
+              "id": "a2",
+              "name": "full_name",
+              "description": "",
+              "data_type": { "kind": "DATA_TYPE_KIND_TEXT" },
+              "nullable": true,
+              "primary_key": false,
+              "unique": false
+            }
+          ]
+        },
+        {
+          "id": "e2",
+          "name": "enrollments",
+          "description": "The enrollments table",
+          "position": { "x": 420, "y": 80 },
+          "attributes": [
+            {
+              "id": "a3",
+              "name": "id",
+              "description": "Surrogate key",
+              "data_type": { "kind": "DATA_TYPE_KIND_UUID" },
+              "nullable": false,
+              "primary_key": true,
+              "unique": false
+            },
+            {
+              "id": "a4",
+              "name": "student_id",
+              "description": "",
+              "data_type": { "kind": "DATA_TYPE_KIND_UUID" },
+              "nullable": true,
+              "primary_key": false,
+              "unique": false,
+              "foreign_key": { "entity_id": "e1", "attribute_id": "a1" }
+            }
+          ]
+        }
+      ],
+      "relationships": [
+        {
+          "id": "r1",
+          "name": "enrolls",
+          "description": "A student holds many enrollments",
+          "from_entity_id": "e2",
+          "from_attribute_id": "a4",
+          "to_entity_id": "e1",
+          "to_attribute_id": "a1",
+          "cardinality": "CARDINALITY_ONE_TO_MANY"
+        }
+      ]
+    }
+  '''
+}
