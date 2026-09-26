@@ -313,10 +313,10 @@ async fn a_deleted_schema_is_gone() {
 }
 
 #[tokio::test]
-async fn validation_reports_the_milestone_it_waits_on_rather_than_passing() {
+async fn a_stored_schema_is_validated_and_undocumented_columns_only_warn() {
     let app = TestApp::new();
 
-    let created = created(&app, "unvalidated").await;
+    let created = created(&app, "validated").await;
 
     let (status, body) = app
         .post(
@@ -325,15 +325,17 @@ async fn validation_reports_the_milestone_it_waits_on_rather_than_passing() {
         )
         .await;
 
-    assert_eq!(
-        status,
-        StatusCode::NOT_IMPLEMENTED,
-        "the frontend must not read a stub as a clean bill of health"
-    );
-    assert!(body["error"]["message"]
-        .as_str()
-        .expect("a message should come back")
-        .contains("M2"));
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["valid"], true, "{body}");
+
+    let diagnostics = body["data"]["diagnostics"]
+        .as_array()
+        .expect("diagnostics should come back");
+
+    assert_eq!(diagnostics.len(), 2, "{body}");
+    assert!(diagnostics.iter().all(|diagnostic| {
+        diagnostic["code"] == "SF-DOC-MISSING" && diagnostic["severity"] == "warning"
+    }));
 }
 
 #[tokio::test]
@@ -364,9 +366,14 @@ async fn generation_reports_the_milestone_it_waits_on() {
 async fn an_unsaved_draft_can_be_validated_without_being_stored() {
     let app = TestApp::new();
 
-    let (entities, relationships) = course_registration();
+    let (mut entities, relationships) = course_registration();
+    entities.push(entity(
+        "e3",
+        "audit_log",
+        vec![attribute("a5", "message", "text")],
+    ));
 
-    let (status, _) = app
+    let (status, body) = app
         .post(
             "/v1/schemas/validate",
             json!({
@@ -379,11 +386,18 @@ async fn an_unsaved_draft_can_be_validated_without_being_stored() {
         )
         .await;
 
-    assert_eq!(
-        status,
-        StatusCode::NOT_IMPLEMENTED,
-        "the draft mapped cleanly and reached the engine, which is what is missing"
-    );
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["valid"], false, "{body}");
+
+    let missing_key = body["data"]["diagnostics"]
+        .as_array()
+        .expect("diagnostics should come back")
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "SF-KEY-MISSING")
+        .expect("the table without a key should be reported");
+
+    assert_eq!(missing_key["severity"], "error");
+    assert_eq!(missing_key["element_ids"], json!(["e3"]));
 
     let (_, body) = app.get("/v1/schemas").await;
 
