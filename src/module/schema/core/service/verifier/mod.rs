@@ -4,6 +4,9 @@ mod references;
 mod structure;
 mod syntax;
 
+#[cfg(test)]
+mod tests;
+
 use crate::module::schema::core::domain::{Attribute, Entity, Relationship, Report, Schema};
 use crate::module::schema::core::ports::Verifier;
 
