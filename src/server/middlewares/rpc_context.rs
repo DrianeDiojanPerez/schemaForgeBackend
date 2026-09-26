@@ -128,7 +128,7 @@ mod tests {
         assert!(is_server_fault(15));
 
         // InvalidArgument, NotFound, AlreadyExists, PermissionDenied and the
-        // two milestones that answer Unimplemented on purpose.
+        // DDL generator, which answers Unimplemented on purpose until M3.
         assert!(!is_server_fault(3));
         assert!(!is_server_fault(5));
         assert!(!is_server_fault(6));

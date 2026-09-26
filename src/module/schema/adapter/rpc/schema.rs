@@ -8,9 +8,6 @@ use crate::package::errdef::Error;
 use crate::package::pagination::ListRequest;
 use crate::rpc::v1;
 
-/// The transport adapter. It translates, delegates, and translates back. No
-/// schema meaning lives here, which is what keeps the core reusable behind a
-/// second transport.
 pub struct SchemaHandler {
     service: Arc<dyn SchemaService>,
 }
@@ -390,12 +387,14 @@ mod tests {
     #[tokio::test]
     async fn an_unimplemented_rpc_says_so_rather_than_returning_an_empty_result() {
         let handler = handler(SpyService::failing(|| {
-            Error::unimplemented("ValidateSchema lands in milestone M2")
+            Error::unimplemented("GenerateDdl lands in milestone M3")
         }));
 
         let status = handler
-            .validate_schema(Request::new(v1::ValidateSchemaRequest {
-                target: Some(v1::validate_schema_request::Target::Id("s1".to_owned())),
+            .generate_ddl(Request::new(v1::GenerateDdlRequest {
+                target: Some(v1::generate_ddl_request::Target::Id("s1".to_owned())),
+                dialect: v1::Dialect::Postgres as i32,
+                include_comments: true,
             }))
             .await
             .expect_err("the call should fail");

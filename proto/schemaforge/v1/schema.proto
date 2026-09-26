@@ -234,8 +234,8 @@ service SchemaService {
   rpc UpdateSchema(UpdateSchemaRequest) returns (UpdateSchemaResponse);
   rpc DeleteSchema(DeleteSchemaRequest) returns (DeleteSchemaResponse);
 
-  // Milestone M2. The contract is fixed now so the frontend can be written
-  // against it; the engine lands in weeks 5-8.
+  // An invalid schema is still an OK response. Only a request the backend
+  // cannot read, or a stored id that does not exist, fails the call.
   rpc ValidateSchema(ValidateSchemaRequest) returns (ValidateSchemaResponse);
 
   // Milestone M3. Lands in weeks 7-11.

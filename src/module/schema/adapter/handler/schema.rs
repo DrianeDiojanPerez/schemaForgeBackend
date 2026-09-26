@@ -394,13 +394,15 @@ mod tests {
 
     #[tokio::test]
     async fn an_unimplemented_endpoint_says_so_rather_than_returning_an_empty_result() {
-        let error = validate(
+        let error = generate_ddl(
             state(SpyService::failing(|| {
-                Error::unimplemented("ValidateSchema lands in milestone M2")
+                Error::unimplemented("GenerateDdl lands in milestone M3")
             })),
-            Json(ValidateRequest {
+            Json(GenerateDdlRequest {
                 schema_id: Some("s1".to_owned()),
                 schema: None,
+                dialect: Some("postgres".to_owned()),
+                include_comments: true,
             }),
         )
         .await

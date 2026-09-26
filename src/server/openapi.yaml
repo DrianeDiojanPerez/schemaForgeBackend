@@ -506,8 +506,8 @@ paths:
         Send either `schema_id` or `schema`, never both. A draft is checked
         without being stored, so the canvas can validate as you draw.
 
-        The validation engine lands in milestone M2; until then the route
-        answers `501` rather than reporting a schema as clean.
+        A schema with defects still answers `200` with `valid` set to false.
+        Errors make a schema invalid, warnings do not.
       security: []
       requestBody:
         required: true
@@ -539,8 +539,6 @@ paths:
           $ref: "#/components/responses/NotFound"
         "422":
           $ref: "#/components/responses/ValidationFailed"
-        "501":
-          $ref: "#/components/responses/NotImplemented"
 
   /v1/schemas/generate-ddl:
     post:
