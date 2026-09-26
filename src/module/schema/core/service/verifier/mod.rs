@@ -1,3 +1,5 @@
+mod cycles;
+mod references;
 mod structure;
 mod syntax;
 
@@ -6,15 +8,18 @@ use crate::module::schema::core::ports::Verifier;
 
 type Check = fn(&Schema, &mut Report);
 
-// Syntax runs before structure so the first thing a user reads about a
-// half-drawn diagram is what is missing from the drawing.
-const CHECKS: [Check; 6] = [
+// Syntax runs before structure and references so the first thing a user
+// reads about a half-drawn diagram is what is missing from the drawing.
+const CHECKS: [Check; 9] = [
     syntax::check_not_empty,
     syntax::check_names,
     syntax::check_type_parameters,
     syntax::check_relationship_ends,
     structure::check_duplicate_names,
     structure::check_primary_keys,
+    references::check_foreign_keys,
+    references::check_relationships,
+    cycles::check_cycles,
 ];
 
 pub struct SchemaVerifier;
@@ -56,4 +61,11 @@ fn relationship(schema: &Schema, relationship: &Relationship) -> String {
         }
         _ => "a relationship".to_owned(),
     }
+}
+
+/// PostgreSQL only lets a foreign key point at columns with a unique
+/// constraint. One column of a composite primary key is not unique on its
+/// own, so it only counts when it is the whole key.
+fn is_unique_key(entity: &Entity, attribute: &Attribute) -> bool {
+    attribute.unique || (attribute.primary_key && entity.primary_key().len() == 1)
 }
