@@ -6,7 +6,7 @@ use crate::module::schema::core::domain::{
     DomainError, Report, Schema, SchemaDraft, SchemaSummary,
 };
 use crate::module::schema::core::ports::{
-    GenerateRequest, Generated, SchemaRepository, SchemaService, ValidationTarget,
+    GenerateRequest, Generated, SchemaRepository, SchemaService, ValidationTarget, Verifier,
 };
 use crate::package::errdef::Error;
 use crate::package::pagination::{Data, ListRequest};
@@ -15,11 +15,15 @@ const MAX_NAME_LENGTH: usize = 120;
 
 pub struct SchemaServiceImpl {
     repository: Arc<dyn SchemaRepository>,
+    verifier: Arc<dyn Verifier>,
 }
 
 impl SchemaServiceImpl {
-    pub fn new(repository: Arc<dyn SchemaRepository>) -> Self {
-        Self { repository }
+    pub fn new(repository: Arc<dyn SchemaRepository>, verifier: Arc<dyn Verifier>) -> Self {
+        Self {
+            repository,
+            verifier,
+        }
     }
 
     /// Payload-level checks only: whether the request itself is usable. The
@@ -99,17 +103,12 @@ impl SchemaService for SchemaServiceImpl {
 
     #[tracing::instrument(name = "SchemaService.Validate", skip_all)]
     async fn validate(&self, target: ValidationTarget) -> Result<Report, Error> {
-        // Resolving the target now rather than at the call site means the
-        // engine landing in M2 only has to be plugged in below: a stored id is
-        // already proven to exist, and a draft is already in canonical form.
-        let _schema = match target {
+        let schema = match target {
             ValidationTarget::Stored(id) => self.find_by_id(&id).await?,
             ValidationTarget::Draft(schema) => *schema,
         };
 
-        Err(Error::unimplemented(
-            "ValidateSchema lands in milestone M2 (weeks 5-8)",
-        ))
+        Ok(self.verifier.verify(&schema))
     }
 
     #[tracing::instrument(name = "SchemaService.GenerateDdl", skip_all)]
@@ -133,7 +132,8 @@ mod tests {
 
     use chrono::{DateTime, Utc};
 
-    use crate::module::schema::core::domain::{Dialect, Entity};
+    use crate::module::schema::core::domain::{diagnostic_code, Diagnostic, Dialect, Entity};
+    use crate::module::schema::core::service::SchemaVerifier;
     use crate::package::errdef::code;
 
     fn now() -> DateTime<Utc> {
@@ -255,7 +255,21 @@ mod tests {
     }
 
     fn service(repository: FakeRepository) -> SchemaServiceImpl {
-        SchemaServiceImpl::new(Arc::new(repository))
+        SchemaServiceImpl::new(Arc::new(repository), Arc::new(SchemaVerifier))
+    }
+
+    struct SeenVerifier(Mutex<Option<String>>);
+
+    impl Verifier for SeenVerifier {
+        fn verify(&self, schema: &Schema) -> Report {
+            *self.0.lock().expect("the lock should be held") = Some(schema.id.clone());
+
+            Report::new(vec![Diagnostic::error(
+                diagnostic_code::MISSING_PRIMARY_KEY,
+                "users has no primary key",
+            )
+            .about("e1")])
+        }
     }
 
     fn draft(name: &str) -> SchemaDraft {
@@ -440,16 +454,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn validating_a_resolvable_target_reports_the_milestone_it_waits_on() {
-        let service = service(FakeRepository::holding(vec![stored("s1", "blog")]));
+    async fn validating_a_stored_schema_hands_it_to_the_verifier() {
+        let verifier = Arc::new(SeenVerifier(Mutex::new(None)));
+        let service = SchemaServiceImpl::new(
+            Arc::new(FakeRepository::holding(vec![stored("s1", "blog")])),
+            verifier.clone(),
+        );
 
-        let error = service
+        let report = service
             .validate(ValidationTarget::Stored("s1".to_owned()))
             .await
-            .expect_err("the engine is not built yet");
+            .expect("validation should run");
 
-        assert_eq!(error.app_code(), code::UNIMPLEMENTED);
-        assert!(error.to_string().contains("M2"));
+        assert_eq!(
+            verifier
+                .0
+                .lock()
+                .expect("the lock should be held")
+                .as_deref(),
+            Some("s1")
+        );
+        assert!(!report.is_valid());
+        assert!(report.has(diagnostic_code::MISSING_PRIMARY_KEY));
+    }
+
+    #[tokio::test]
+    async fn a_draft_is_verified_without_being_stored() {
+        let repository = Arc::new(FakeRepository::default());
+        let service = SchemaServiceImpl::new(repository.clone(), Arc::new(SchemaVerifier));
+
+        let report = service
+            .validate(ValidationTarget::Draft(Box::new(stored("", "draft"))))
+            .await
+            .expect("validation should run");
+
+        assert!(
+            report.has(diagnostic_code::MISSING_PRIMARY_KEY),
+            "the draft's users table has no key"
+        );
+        assert!(repository
+            .schemas
+            .lock()
+            .expect("the lock should be held")
+            .is_empty());
     }
 
     #[tokio::test]

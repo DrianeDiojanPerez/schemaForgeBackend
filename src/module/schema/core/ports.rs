@@ -6,9 +6,6 @@ use crate::module::schema::core::domain::{
 use crate::package::errdef::Error;
 use crate::package::pagination::{Data, ListRequest};
 
-/// The store the schemas live in. Named as a capability the core needs rather
-/// than as the technology behind it, so the PostgreSQL adapter the server runs
-/// and the fake the transport tests run are interchangeable.
 #[async_trait]
 pub trait SchemaRepository: Send + Sync {
     async fn index(&self, request: &ListRequest) -> Result<(Vec<SchemaSummary>, i64), DomainError>;
@@ -19,23 +16,15 @@ pub trait SchemaRepository: Send + Sync {
     async fn delete(&self, id: &str) -> Result<(), DomainError>;
 }
 
-/// Verification and validation. A pure function of the model: no store, no
-/// clock, no transport, which is what makes it unit-testable in isolation
-/// against known-good and known-bad schemas.
 pub trait Verifier: Send + Sync {
     fn verify(&self, schema: &Schema) -> Report;
 }
 
-/// DDL generation for one target dialect. One implementation per dialect, all
-/// reading the same canonical model.
 pub trait Generator: Send + Sync {
     fn dialect(&self) -> Dialect;
     fn generate(&self, schema: &Schema, include_comments: bool) -> String;
 }
 
-/// What the transport adapter is allowed to call. The handler depends on this
-/// trait rather than on the concrete service, so a test can drive the RPC
-/// surface with a fake.
 #[async_trait]
 pub trait SchemaService: Send + Sync {
     async fn index(&self, request: ListRequest) -> Result<Data<SchemaSummary>, Error>;
@@ -45,18 +34,12 @@ pub trait SchemaService: Send + Sync {
     async fn delete(&self, id: &str) -> Result<(), Error>;
 
     /// Validates a stored schema, or an unsaved draft the canvas is holding.
-    ///
-    /// Milestone M2: the contract is fixed so the frontend can be written
-    /// against it, and the engine lands in weeks 5-8.
     async fn validate(&self, target: ValidationTarget) -> Result<Report, Error>;
 
     /// Milestone M3: lands in weeks 7-11.
     async fn generate_ddl(&self, request: GenerateRequest) -> Result<Generated, Error>;
 }
 
-/// Validation runs either against something already stored or against a draft
-/// that only exists on the canvas. Modelling it as a choice keeps the caller
-/// from having to save a half-drawn diagram just to check it.
 #[derive(Debug, Clone)]
 pub enum ValidationTarget {
     Stored(String),
