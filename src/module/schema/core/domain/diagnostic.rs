@@ -15,6 +15,7 @@ pub mod code {
     pub const ATTRIBUTE_WITHOUT_TYPE: &str = "SF-ATTR-UNTYPED";
     pub const EMPTY_NAME: &str = "SF-NAME-EMPTY";
     pub const EMPTY_SCHEMA: &str = "SF-SCHEMA-EMPTY";
+    pub const INVALID_TYPE_PARAMETER: &str = "SF-TYPE-PARAM";
 
     // Structural defects: the schema is not internally consistent.
     pub const DUPLICATE_ENTITY_NAME: &str = "SF-DUP-ENTITY";
@@ -24,6 +25,8 @@ pub mod code {
     pub const FOREIGN_KEY_NOT_A_KEY: &str = "SF-FK-NOT-A-KEY";
     pub const CIRCULAR_DEPENDENCY: &str = "SF-DEP-CYCLE";
     pub const TYPE_MISMATCH: &str = "SF-TYPE-MISMATCH";
+    pub const RELATIONSHIP_WITHOUT_FOREIGN_KEY: &str = "SF-REL-NO-FK";
+    pub const CARDINALITY_MISMATCH: &str = "SF-REL-CARDINALITY";
 
     // Soft, non-blocking.
     pub const MISSING_DESCRIPTION: &str = "SF-DOC-MISSING";

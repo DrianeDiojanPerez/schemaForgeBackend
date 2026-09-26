@@ -83,8 +83,8 @@ impl DataTypeKind {
     }
 
     /// Family membership drives foreign-key type compatibility. A foreign key
-    /// on a `bigint` referencing an `integer` primary key is a defect the
-    /// validation engine reports, but `varchar` referencing `text` is not.
+    /// on a `uuid` referencing a `text` key is a defect the validation engine
+    /// reports, but `bigint` referencing `integer` is not.
     pub const fn family(self) -> TypeFamily {
         match self {
             DataTypeKind::Text | DataTypeKind::Varchar | DataTypeKind::Char => TypeFamily::Textual,
