@@ -396,31 +396,31 @@ async fn a_deleted_schema_is_gone() {
 }
 
 #[tokio::test]
-async fn validation_reports_the_milestone_it_waits_on_rather_than_passing() {
+async fn a_stored_schema_is_validated_and_undocumented_columns_only_warn() {
     let server = TestServer::start().await;
     let mut client = server.schema_client().await;
 
     let created = client
-        .create_schema(create_request("unvalidated"))
+        .create_schema(create_request("validated"))
         .await
         .expect("creation should succeed")
         .into_inner()
         .schema
         .expect("a created schema should come back");
 
-    let status = client
+    let report = client
         .validate_schema(v1::ValidateSchemaRequest {
             target: Some(v1::validate_schema_request::Target::Id(created.id)),
         })
         .await
-        .expect_err("the engine is not built yet");
+        .expect("validation should run")
+        .into_inner();
 
-    assert_eq!(
-        status.code(),
-        Code::Unimplemented,
-        "the frontend must not read a stub as a clean bill of health"
-    );
-    assert!(status.message().contains("M2"));
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    assert_eq!(report.diagnostics.len(), 2);
+    assert!(report.diagnostics.iter().all(|diagnostic| {
+        diagnostic.code == "SF-DOC-MISSING" && diagnostic.severity == v1::Severity::Warning as i32
+    }));
 }
 
 #[tokio::test]
@@ -454,9 +454,14 @@ async fn an_unsaved_draft_can_be_validated_without_being_stored() {
     let server = TestServer::start().await;
     let mut client = server.schema_client().await;
 
-    let (entities, relationships) = course_registration();
+    let (mut entities, relationships) = course_registration();
+    entities.push(entity(
+        "e3",
+        "audit_log",
+        vec![attribute("a5", "message", v1::DataTypeKind::Text)],
+    ));
 
-    let status = client
+    let report = client
         .validate_schema(v1::ValidateSchemaRequest {
             target: Some(v1::validate_schema_request::Target::Draft(v1::Schema {
                 id: String::new(),
@@ -469,12 +474,23 @@ async fn an_unsaved_draft_can_be_validated_without_being_stored() {
             })),
         })
         .await
-        .expect_err("the engine is not built yet");
+        .expect("validation should run")
+        .into_inner();
 
+    assert!(!report.valid);
+
+    let missing_key = report
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "SF-KEY-MISSING")
+        .expect("the table without a key should be reported");
+
+    assert_eq!(missing_key.severity, v1::Severity::Error as i32);
+    assert_eq!(missing_key.element_ids, vec!["e3"]);
     assert_eq!(
-        status.code(),
-        Code::Unimplemented,
-        "the draft mapped cleanly and reached the engine, which is what is missing"
+        missing_key.location,
+        Some(v1::Position { x: 40.0, y: 80.0 }),
+        "the canvas places the mark using this"
     );
 
     let listed = client
