@@ -1,4 +1,5 @@
 mod cycles;
+mod documentation;
 mod references;
 mod structure;
 mod syntax;
@@ -10,7 +11,7 @@ type Check = fn(&Schema, &mut Report);
 
 // Syntax runs before structure and references so the first thing a user
 // reads about a half-drawn diagram is what is missing from the drawing.
-const CHECKS: [Check; 9] = [
+const CHECKS: [Check; 10] = [
     syntax::check_not_empty,
     syntax::check_names,
     syntax::check_type_parameters,
@@ -20,6 +21,7 @@ const CHECKS: [Check; 9] = [
     references::check_foreign_keys,
     references::check_relationships,
     cycles::check_cycles,
+    documentation::check_documentation,
 ];
 
 pub struct SchemaVerifier;
