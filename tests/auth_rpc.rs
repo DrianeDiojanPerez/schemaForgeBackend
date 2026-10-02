@@ -132,6 +132,84 @@ async fn a_stale_refresh_token_is_refused() {
 }
 
 #[tokio::test]
+async fn the_frontend_asks_the_backend_where_to_send_the_browser() {
+    let server = TestServer::start().await;
+    let mut client = server.auth_client().await;
+
+    let link = client
+        .google_login_url(v1::GoogleLoginUrlRequest {
+            state: "opaque-state".to_owned(),
+        })
+        .await
+        .expect("the consent link should be served without a token")
+        .into_inner();
+
+    assert!(link.url.contains("opaque-state"));
+}
+
+#[tokio::test]
+async fn a_google_code_is_traded_for_the_same_token_pair_a_password_buys() {
+    let server = TestServer::start().await;
+    let mut client = server.auth_client().await;
+
+    let tokens = client
+        .login_with_google(v1::LoginWithGoogleRequest {
+            code: "a-valid-google-code".to_owned(),
+        })
+        .await
+        .expect("the sign in should succeed")
+        .into_inner();
+
+    assert!(!tokens.token.is_empty());
+    assert!(!tokens.refresh_token.is_empty());
+}
+
+#[tokio::test]
+async fn a_code_google_rejects_is_unauthenticated() {
+    let server = TestServer::start().await;
+    let mut client = server.auth_client().await;
+
+    let status = client
+        .login_with_google(v1::LoginWithGoogleRequest {
+            code: "a-used-up-code".to_owned(),
+        })
+        .await
+        .expect_err("the sign in should fail");
+
+    assert_eq!(status.code(), Code::Unauthenticated);
+}
+
+#[tokio::test]
+async fn a_google_account_without_a_user_is_denied_rather_than_signed_in() {
+    let server = TestServer::start().await;
+    let mut client = server.auth_client().await;
+
+    let status = client
+        .login_with_google(v1::LoginWithGoogleRequest {
+            code: "a-google-code-for-a-stranger".to_owned(),
+        })
+        .await
+        .expect_err("the sign in should fail");
+
+    assert_eq!(status.code(), Code::PermissionDenied);
+}
+
+#[tokio::test]
+async fn an_empty_google_code_is_a_validation_failure() {
+    let server = TestServer::start().await;
+    let mut client = server.auth_client().await;
+
+    let status = client
+        .login_with_google(v1::LoginWithGoogleRequest {
+            code: String::new(),
+        })
+        .await
+        .expect_err("the sign in should fail");
+
+    assert_eq!(status.code(), Code::InvalidArgument);
+}
+
+#[tokio::test]
 async fn a_schema_call_without_a_token_never_reaches_the_handler() {
     let server = TestServer::start().await;
     let mut client = server.anonymous_schema_client().await;
