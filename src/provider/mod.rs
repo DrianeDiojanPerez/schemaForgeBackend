@@ -3,7 +3,9 @@ use std::sync::Arc;
 use crate::config::AppConfig;
 use crate::database::{Database, TxManager};
 use crate::module::{iam, schema};
-use crate::package::auth::{Auth, AuthService, PostgresAuthStore};
+use crate::package::auth::{
+    Auth, AuthService, GoogleCredentials, GoogleIdentity, GoogleOAuth, PostgresAuthStore,
+};
 use crate::package::emailer::{Emailer, SmtpEmailer};
 use crate::package::jwt::{HmacTokenGenerator, TokenGenerator};
 use crate::package::rbac::{Engine, PostgresRbacStore, RbacEngine};
@@ -34,10 +36,17 @@ impl Provider {
         let jwt: Arc<dyn TokenGenerator> = Arc::new(HmacTokenGenerator::new(config.jwt.secret()));
         let mailer: Arc<dyn Emailer> = Arc::new(SmtpEmailer::new(&config.mail));
 
+        let google: Arc<dyn GoogleIdentity> = Arc::new(GoogleOAuth::new(GoogleCredentials {
+            client_id: config.google.client_id.clone(),
+            client_secret: config.google.client_secret.clone(),
+            redirect_uri: config.google.redirect_uri.clone(),
+        }));
+
         let auth: Arc<dyn Auth> = Arc::new(AuthService::new(
             jwt.clone(),
             Arc::new(PostgresAuthStore::new(database.clone())),
             mailer.clone(),
+            google,
             config.auth.access_token_ttl_in_seconds,
             config.auth.refresh_token_ttl_in_seconds,
         ));

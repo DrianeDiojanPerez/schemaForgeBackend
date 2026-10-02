@@ -83,6 +83,23 @@ impl Auth for FakeAuth {
         Err(Error::unauthorized("invalid or malformed refresh token"))
     }
 
+    fn google_login_url(&self, state: &str) -> String {
+        format!("https://accounts.google.test/consent?state={state}")
+    }
+
+    async fn login_with_google(&self, code: &str) -> Result<AuthenticationTokens, Error> {
+        match code {
+            "a-valid-google-code" => Ok(AuthenticationTokens {
+                token: VALID_TOKEN.to_owned(),
+                refresh_token: "a-valid-refresh-token".to_owned(),
+            }),
+            "a-google-code-for-a-stranger" => Err(Error::forbidden(
+                "this google account is not allowed to use the app",
+            )),
+            _ => Err(Error::unauthorized("google rejected the sign in code")),
+        }
+    }
+
     async fn get_identity(&self, access_token: &str) -> Result<Identity, Error> {
         if access_token == VALID_TOKEN {
             return Ok(self.user.clone());

@@ -23,6 +23,10 @@ pub trait Auth: Send + Sync {
 
     async fn refresh_token(&self, refresh_token: &str) -> Result<AuthenticationTokens, Error>;
 
+    fn google_login_url(&self, state: &str) -> String;
+
+    async fn login_with_google(&self, code: &str) -> Result<AuthenticationTokens, Error>;
+
     async fn get_identity(&self, access_token: &str) -> Result<Identity, Error>;
 
     async fn password_recovery(&self, email: &str, callback_uri: &str) -> Result<(), Error>;

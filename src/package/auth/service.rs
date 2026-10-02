@@ -6,7 +6,7 @@ use chrono::{Duration, Utc};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::package::auth::{Auth, Store};
+use crate::package::auth::{Auth, GoogleIdentity, Store};
 use crate::package::auth::{AuthenticationTokens, Identity};
 use crate::package::crypto;
 use crate::package::emailer::Emailer;
@@ -17,11 +17,14 @@ const PASSWORD_RESET_TTL_MINUTES: i64 = 15;
 
 const INVALID_CREDENTIALS: &str = "invalid username or password";
 const INVALID_REFRESH_TOKEN: &str = "invalid or malformed refresh token";
+const UNVERIFIED_GOOGLE_EMAIL: &str = "the google account has no verified email address";
+const GOOGLE_ACCOUNT_NOT_ALLOWED: &str = "this google account is not allowed to use the app";
 
 pub struct AuthService {
     jwt: Arc<dyn TokenGenerator>,
     store: Arc<dyn Store>,
     mailer: Arc<dyn Emailer>,
+    google: Arc<dyn GoogleIdentity>,
     token_ttl: i64,
     refresh_token_ttl: i64,
 }
@@ -31,6 +34,7 @@ impl AuthService {
         jwt: Arc<dyn TokenGenerator>,
         store: Arc<dyn Store>,
         mailer: Arc<dyn Emailer>,
+        google: Arc<dyn GoogleIdentity>,
         token_ttl: i64,
         refresh_token_ttl: i64,
     ) -> Self {
@@ -38,6 +42,7 @@ impl AuthService {
             jwt,
             store,
             mailer,
+            google,
             token_ttl,
             refresh_token_ttl,
         }
@@ -129,6 +134,29 @@ impl Auth for AuthService {
         self.generate_tokens(&user)
     }
 
+    fn google_login_url(&self, state: &str) -> String {
+        self.google.consent_url(state)
+    }
+
+    async fn login_with_google(&self, code: &str) -> Result<AuthenticationTokens, Error> {
+        let account = self.google.account_for(code).await?;
+
+        if !account.email_verified {
+            return Err(Error::unauthorized(UNVERIFIED_GOOGLE_EMAIL));
+        }
+
+        // Google says who the person is, the user table says whether they may
+        // be here. Signing in never creates an account.
+        let user = self
+            .store
+            .find_user_by_email(&account.email)
+            .await
+            .map_err(Error::unknown)?
+            .ok_or_else(|| Error::forbidden(GOOGLE_ACCOUNT_NOT_ALLOWED))?;
+
+        self.generate_tokens(&user)
+    }
+
     async fn get_identity(&self, access_token: &str) -> Result<Identity, Error> {
         let user_id = self.user_id_from(access_token)?;
 
@@ -207,7 +235,7 @@ mod tests {
 
     use async_trait::async_trait;
 
-    use crate::package::auth::PasswordReset;
+    use crate::package::auth::{GoogleAccount, PasswordReset};
     use crate::package::emailer::EmailerError;
     use crate::package::errdef::code;
     use crate::package::jwt::HmacTokenGenerator;
@@ -283,6 +311,46 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct FakeGoogle {
+        account: Option<GoogleAccount>,
+        reachable: bool,
+    }
+
+    impl FakeGoogle {
+        fn answering_with(email: &str, email_verified: bool) -> Self {
+            Self {
+                account: Some(GoogleAccount {
+                    email: email.to_owned(),
+                    email_verified,
+                    name: "A Person".to_owned(),
+                }),
+                reachable: true,
+            }
+        }
+
+        fn down() -> Self {
+            Self::default()
+        }
+    }
+
+    #[async_trait]
+    impl GoogleIdentity for FakeGoogle {
+        fn consent_url(&self, state: &str) -> String {
+            format!("https://accounts.google.test/consent?state={state}")
+        }
+
+        async fn account_for(&self, _code: &str) -> Result<GoogleAccount, Error> {
+            if !self.reachable {
+                return Err(Error::unavailable("google could not be reached"));
+            }
+
+            self.account
+                .clone()
+                .ok_or_else(|| Error::unauthorized("google rejected the sign in code"))
+        }
+    }
+
     /// to, subject, template name, template data.
     type SentMail = (String, String, String, HashMap<String, String>);
 
@@ -324,11 +392,19 @@ mod tests {
         store: Arc<FakeStore>,
         mailer: Arc<FakeMailer>,
     ) -> (AuthService, Arc<dyn TokenGenerator>) {
+        service_with_google(store, mailer, Arc::new(FakeGoogle::default()))
+    }
+
+    fn service_with_google(
+        store: Arc<FakeStore>,
+        mailer: Arc<FakeMailer>,
+        google: Arc<FakeGoogle>,
+    ) -> (AuthService, Arc<dyn TokenGenerator>) {
         let jwt: Arc<dyn TokenGenerator> =
             Arc::new(HmacTokenGenerator::new(&MaskedBytes::new("secret")));
 
         (
-            AuthService::new(jwt.clone(), store, mailer, 3600, 604_800),
+            AuthService::new(jwt.clone(), store, mailer, google, 3600, 604_800),
             jwt,
         )
     }
@@ -458,6 +534,84 @@ mod tests {
             .expect_err("refresh should fail");
 
         assert_eq!(code_of(&err), code::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn the_consent_url_round_trips_the_state_untouched() {
+        let store = Arc::new(FakeStore::with_user(a_user()));
+        let (service, _) = service_with(store, Arc::new(FakeMailer::default()));
+
+        assert!(service
+            .google_login_url("opaque-state")
+            .ends_with("opaque-state"));
+    }
+
+    #[tokio::test]
+    async fn a_google_account_that_matches_a_user_gets_the_same_token_pair() {
+        let user = a_user();
+        let store = Arc::new(FakeStore::with_user(user.clone()));
+        let google = Arc::new(FakeGoogle::answering_with(&user.email, true));
+        let (service, jwt) = service_with_google(store, Arc::new(FakeMailer::default()), google);
+
+        let tokens = service
+            .login_with_google("a-code")
+            .await
+            .expect("the sign in should succeed");
+
+        let claims = jwt
+            .validate_token(&tokens.token)
+            .expect("the access token should validate");
+
+        assert_eq!(
+            claims.get("user_id").and_then(Value::as_str),
+            Some(user.id.to_string().as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_google_account_with_no_user_is_refused() {
+        let store = Arc::new(FakeStore::with_user(a_user()));
+        let google = Arc::new(FakeGoogle::answering_with("stranger@example.com", true));
+        let (service, _) = service_with_google(store, Arc::new(FakeMailer::default()), google);
+
+        let err = service
+            .login_with_google("a-code")
+            .await
+            .expect_err("the sign in should fail");
+
+        assert_eq!(code_of(&err), code::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn an_unverified_google_address_never_reaches_the_user_table() {
+        let user = a_user();
+        let store = Arc::new(FakeStore::with_user(user.clone()));
+        let google = Arc::new(FakeGoogle::answering_with(&user.email, false));
+        let (service, _) = service_with_google(store, Arc::new(FakeMailer::default()), google);
+
+        let err = service
+            .login_with_google("a-code")
+            .await
+            .expect_err("the sign in should fail");
+
+        assert_eq!(code_of(&err), code::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn google_being_down_is_not_the_users_fault() {
+        let store = Arc::new(FakeStore::with_user(a_user()));
+        let (service, _) = service_with_google(
+            store,
+            Arc::new(FakeMailer::default()),
+            Arc::new(FakeGoogle::down()),
+        );
+
+        let err = service
+            .login_with_google("a-code")
+            .await
+            .expect_err("the sign in should fail");
+
+        assert_eq!(code_of(&err), code::UNAVAILABLE);
     }
 
     #[tokio::test]
