@@ -1,8 +1,10 @@
 mod domain;
+mod google;
 mod service;
 mod store;
 
 pub use domain::{AuthenticationTokens, Identity, PasswordReset};
+pub use google::{GoogleAccount, GoogleCredentials, GoogleIdentity, GoogleOAuth};
 pub use service::AuthService;
 pub use store::{PostgresAuthStore, Store};
 
