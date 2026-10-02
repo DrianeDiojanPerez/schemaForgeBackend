@@ -1,5 +1,6 @@
 mod auth;
 mod db;
+mod google;
 mod jwt;
 mod logger;
 mod mail;
@@ -8,6 +9,7 @@ mod server;
 
 pub use auth::Auth;
 pub use db::Db;
+pub use google::Google;
 pub use jwt::Jwt;
 pub use logger::{LogLevel, Logger};
 pub use mail::Mail;
@@ -27,6 +29,7 @@ pub struct AppConfig {
     pub mail: Mail,
     pub jwt: Jwt,
     pub auth: Auth,
+    pub google: Google,
     pub rbac: Rbac,
 }
 
@@ -44,6 +47,7 @@ impl AppConfig {
             mail: Self::load_mail()?,
             jwt: Self::load_jwt()?,
             auth: Self::load_auth()?,
+            google: Self::load_google()?,
             rbac: Self::load_rbac()?,
         })
     }
@@ -107,6 +111,14 @@ impl AppConfig {
                 "AUTHENTICATION_REFRESH_TOKEN_TTL_SECONDS",
                 604_800,
             )?,
+        })
+    }
+
+    fn load_google() -> Result<Google, ConfigError> {
+        Ok(Google {
+            client_id: env::required("GOOGLE_CLIENT_ID")?,
+            client_secret: env::required("GOOGLE_CLIENT_SECRET")?,
+            redirect_uri: env::required("GOOGLE_REDIRECT_URI")?,
         })
     }
 
@@ -198,6 +210,18 @@ mod tests {
         assert!(!deployment(Environment::Local).is_production());
         // Only the three names are accepted.
         assert!("staging".parse::<Environment>().is_err());
+    }
+
+    #[test]
+    fn the_google_client_secret_stays_out_of_the_debug_output() {
+        let google = Google {
+            client_id: "123.apps.googleusercontent.com".to_owned(),
+            client_secret: "GOCSPX-hunter2".to_owned(),
+            redirect_uri: "http://localhost:3100/auth/google/callback".to_owned(),
+        };
+
+        assert!(!format!("{google:?}").contains("hunter2"));
+        assert!(format!("{google:?}").contains("123.apps.googleusercontent.com"));
     }
 
     #[test]
