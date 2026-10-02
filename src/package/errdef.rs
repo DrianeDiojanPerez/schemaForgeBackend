@@ -16,6 +16,7 @@ pub mod code {
     pub const UNPROCESSABLE: i32 = 1005;
     pub const FORBIDDEN: i32 = 1006;
     pub const UNIMPLEMENTED: i32 = 1007;
+    pub const UNAVAILABLE: i32 = 1008;
     pub const UNKNOWN: i32 = 2000;
 }
 
@@ -35,6 +36,7 @@ fn transport_code_for(code: i32) -> Code {
         code::UNPROCESSABLE | code::VALIDATION_FAILED => Code::InvalidArgument,
         code::FORBIDDEN => Code::PermissionDenied,
         code::UNIMPLEMENTED => Code::Unimplemented,
+        code::UNAVAILABLE => Code::Unavailable,
         code::UNKNOWN => Code::Internal,
         _ => Code::InvalidArgument,
     }
@@ -49,6 +51,7 @@ fn status_for(code: i32) -> StatusCode {
         code::UNPROCESSABLE => StatusCode::UNPROCESSABLE_ENTITY,
         code::FORBIDDEN => StatusCode::FORBIDDEN,
         code::UNIMPLEMENTED => StatusCode::NOT_IMPLEMENTED,
+        code::UNAVAILABLE => StatusCode::SERVICE_UNAVAILABLE,
         code::UNKNOWN => StatusCode::INTERNAL_SERVER_ERROR,
         _ => StatusCode::BAD_REQUEST,
     }
@@ -126,6 +129,13 @@ impl Error {
     /// stub response it might mistake for a result.
     pub fn unimplemented(message: impl Into<String>) -> Self {
         Self::new(code::UNIMPLEMENTED, message)
+    }
+
+    /// For a service the request depends on that cannot be reached. The
+    /// caller can retry this one, which is what separates it from an unknown
+    /// error.
+    pub fn unavailable(message: impl Into<String>) -> Self {
+        Self::new(code::UNAVAILABLE, message)
     }
 
     /// The cause is logged but never returned to the caller.
@@ -297,6 +307,10 @@ mod tests {
             StatusCode::UNPROCESSABLE_ENTITY
         );
         assert_eq!(status_for(code::FORBIDDEN), StatusCode::FORBIDDEN);
+        assert_eq!(
+            status_for(code::UNAVAILABLE),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
         assert_eq!(status_for(code::UNKNOWN), StatusCode::INTERNAL_SERVER_ERROR);
         // Anything unmapped falls back to a bad request rather than a 500.
         assert_eq!(status_for(4242), StatusCode::BAD_REQUEST);
@@ -342,6 +356,18 @@ mod tests {
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(body["error"]["message"], "internal server error");
         assert!(!body.to_string().contains("10.0.0.1"));
+    }
+
+    #[test]
+    fn an_unreachable_dependency_is_retryable_on_both_ports() {
+        let status = Status::from(Error::unavailable("google is unreachable"));
+
+        assert_eq!(status.code(), Code::Unavailable);
+        assert_eq!(
+            transport_code_for(code::UNAVAILABLE),
+            Code::Unavailable,
+            "a retryable failure must not read as an internal one"
+        );
     }
 
     #[test]
