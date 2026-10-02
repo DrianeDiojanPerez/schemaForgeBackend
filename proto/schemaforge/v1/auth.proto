@@ -21,9 +21,30 @@ message RefreshTokenResponse {
   string refresh_token = 2;
 }
 
+// The state is opaque to the backend: it goes to Google untouched and comes
+// back on the redirect, which is how the frontend ties the two halves of one
+// sign in together.
+message GoogleLoginUrlRequest {
+  string state = 1;
+}
+
+message GoogleLoginUrlResponse {
+  string url = 1;
+}
+
+message LoginWithGoogleRequest {
+  string code = 1;
+}
+
 // Where the frontend server trades credentials for tokens. Every other call
 // carries the access token this hands back in its `authorization` metadata.
 service AuthService {
   rpc Login(LoginRequest) returns (LoginResponse);
   rpc RefreshToken(RefreshTokenRequest) returns (RefreshTokenResponse);
+
+  // The frontend holds no Google settings of its own. It asks for the consent
+  // link here, sends the browser there, and hands back the code Google
+  // returns.
+  rpc GoogleLoginUrl(GoogleLoginUrlRequest) returns (GoogleLoginUrlResponse);
+  rpc LoginWithGoogle(LoginWithGoogleRequest) returns (LoginResponse);
 }

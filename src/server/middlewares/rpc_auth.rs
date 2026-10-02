@@ -25,7 +25,7 @@ enum Access {
 
 /// gRPC has no route table to hang a guard on, so the method path is the
 /// route and this is the table. The health check, the reflection service and
-/// the two calls that mint tokens are all that is reachable without a token.
+/// the calls that mint tokens are all that is reachable without a token.
 fn access_for(path: &str) -> Access {
     let Some(method) = path.strip_prefix(SCHEMA_SERVICE) else {
         return Access::Open;

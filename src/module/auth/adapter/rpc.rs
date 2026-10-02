@@ -73,4 +73,38 @@ impl v1::auth_service_server::AuthService for AuthHandler {
             refresh_token: tokens.refresh_token,
         }))
     }
+
+    #[tracing::instrument(name = "AuthService.GoogleLoginUrl", skip_all)]
+    async fn google_login_url(
+        &self,
+        request: Request<v1::GoogleLoginUrlRequest>,
+    ) -> Result<Response<v1::GoogleLoginUrlResponse>, Status> {
+        let request = request.into_inner();
+
+        Ok(Response::new(v1::GoogleLoginUrlResponse {
+            url: self.service.google_login_url(&request.state),
+        }))
+    }
+
+    #[tracing::instrument(name = "AuthService.LoginWithGoogle", skip_all)]
+    async fn login_with_google(
+        &self,
+        request: Request<v1::LoginWithGoogleRequest>,
+    ) -> Result<Response<v1::LoginResponse>, Status> {
+        let request = request.into_inner();
+
+        let mut error = Error::validation("failed payload validation");
+        required("code", &request.code, &mut error);
+
+        if error.has_violations() {
+            return Err(error.into());
+        }
+
+        let tokens = self.service.login_with_google(&request.code).await?;
+
+        Ok(Response::new(v1::LoginResponse {
+            token: tokens.token,
+            refresh_token: tokens.refresh_token,
+        }))
+    }
 }
