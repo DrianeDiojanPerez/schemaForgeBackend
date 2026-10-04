@@ -1,6 +1,8 @@
 //! The Google half of sign in: the consent link the browser is sent to, and
 //! the exchange that turns the code it comes back with into an account.
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -12,6 +14,8 @@ const CONSENT_ENDPOINT: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
 const SCOPE: &str = "openid email profile";
 
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
+
 const UNREACHABLE: &str = "google could not be reached";
 const INVALID_CODE: &str = "google rejected the sign in code";
 
@@ -20,6 +24,7 @@ pub struct GoogleAccount {
     pub email: String,
     pub email_verified: bool,
     pub name: String,
+    pub picture: Option<String>,
 }
 
 #[async_trait]
@@ -45,7 +50,10 @@ impl GoogleOAuth {
     pub fn new(credentials: GoogleCredentials) -> Self {
         Self {
             credentials,
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .timeout(REQUEST_TIMEOUT)
+                .build()
+                .expect("a plain reqwest client builds"),
             token_endpoint: TOKEN_ENDPOINT.to_owned(),
         }
     }
@@ -117,6 +125,8 @@ struct IdToken {
     email_verified: bool,
     #[serde(default)]
     name: String,
+    #[serde(default)]
+    picture: Option<String>,
 }
 
 /// The token came straight from Google over TLS in answer to a request
@@ -135,6 +145,7 @@ fn account_from(id_token: &str) -> Result<GoogleAccount, Error> {
         email: claims.email,
         email_verified: claims.email_verified,
         name: claims.name,
+        picture: claims.picture,
     })
 }
 
@@ -189,6 +200,7 @@ mod tests {
             "email": "person@example.com",
             "email_verified": true,
             "name": "A Person",
+            "picture": "https://lh3.googleusercontent.test/a/photo",
         }));
 
         let account = account_from(&token).expect("the token should parse");
@@ -196,6 +208,19 @@ mod tests {
         assert_eq!(account.email, "person@example.com");
         assert!(account.email_verified);
         assert_eq!(account.name, "A Person");
+        assert_eq!(
+            account.picture.as_deref(),
+            Some("https://lh3.googleusercontent.test/a/photo")
+        );
+    }
+
+    #[test]
+    fn an_account_with_no_photo_has_no_picture() {
+        let token = id_token(json!({ "email": "person@example.com" }));
+
+        let account = account_from(&token).expect("the token should parse");
+
+        assert_eq!(account.picture, None);
     }
 
     #[test]

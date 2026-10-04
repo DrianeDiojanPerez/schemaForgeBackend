@@ -8,9 +8,20 @@ pub struct Identity {
     pub id: Uuid,
     pub email: String,
     pub user_name: String,
+    pub first_name: String,
+    pub last_name: String,
+    pub avatar_url: Option<String>,
     #[serde(skip)]
     pub password: String,
     pub roles: Vec<String>,
+}
+
+impl Identity {
+    pub fn display_name(&self) -> String {
+        format!("{} {}", self.first_name.trim(), self.last_name.trim())
+            .trim()
+            .to_owned()
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

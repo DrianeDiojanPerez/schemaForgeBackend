@@ -10,6 +10,13 @@ use crate::package::auth::{Identity, PasswordReset};
 pub trait Store: Send + Sync {
     async fn find_user_by_id(&self, user_id: Uuid) -> Result<Option<Identity>, sqlx::Error>;
     async fn find_user_by_email(&self, email: &str) -> Result<Option<Identity>, sqlx::Error>;
+    async fn update_profile(
+        &self,
+        user_id: Uuid,
+        first_name: &str,
+        last_name: &str,
+        avatar_url: Option<&str>,
+    ) -> Result<(), sqlx::Error>;
     async fn create_password_reset(&self, email: &str, token: &str) -> Result<(), sqlx::Error>;
     async fn reset_password(&self, email: &str, new_password: &str) -> Result<(), sqlx::Error>;
     async fn find_password_by_token(
@@ -53,13 +60,17 @@ impl PostgresAuthStore {
             id,
             email: row.try_get("email")?,
             user_name: row.try_get("user_name")?,
+            first_name: row.try_get("first_name")?,
+            last_name: row.try_get("last_name")?,
+            avatar_url: row.try_get("avatar_url")?,
             password: row.try_get("password")?,
             roles: self.get_user_roles(id).await?,
         }))
     }
 }
 
-const SELECT_USER: &str = "SELECT u.id, u.email, u.user_name, u.password FROM iam.users u";
+const SELECT_USER: &str = "SELECT u.id, u.email, u.user_name, u.first_name, u.last_name, \
+     u.avatar_url, u.password FROM iam.users u";
 
 #[async_trait]
 impl Store for PostgresAuthStore {
@@ -79,6 +90,26 @@ impl Store for PostgresAuthStore {
             .await?;
 
         self.enrich(row).await
+    }
+
+    async fn update_profile(
+        &self,
+        user_id: Uuid,
+        first_name: &str,
+        last_name: &str,
+        avatar_url: Option<&str>,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "UPDATE iam.users SET first_name = $1, last_name = $2, avatar_url = $3 WHERE id = $4",
+        )
+        .bind(first_name)
+        .bind(last_name)
+        .bind(avatar_url)
+        .bind(user_id)
+        .execute(self.db.pool())
+        .await?;
+
+        Ok(())
     }
 
     async fn create_password_reset(&self, email: &str, token: &str) -> Result<(), sqlx::Error> {

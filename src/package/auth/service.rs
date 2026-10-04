@@ -6,7 +6,7 @@ use chrono::{Duration, Utc};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::package::auth::{Auth, GoogleIdentity, Store};
+use crate::package::auth::{Auth, GoogleAccount, GoogleIdentity, Store};
 use crate::package::auth::{AuthenticationTokens, Identity};
 use crate::package::crypto;
 use crate::package::emailer::Emailer;
@@ -19,6 +19,15 @@ const INVALID_CREDENTIALS: &str = "invalid username or password";
 const INVALID_REFRESH_TOKEN: &str = "invalid or malformed refresh token";
 const UNVERIFIED_GOOGLE_EMAIL: &str = "the google account has no verified email address";
 const GOOGLE_ACCOUNT_NOT_ALLOWED: &str = "this google account is not allowed to use the app";
+
+/// Google hands back one name. Everything after the first space is the last
+/// name, so a person with one word for a name keeps an empty last name.
+fn split_name(name: &str) -> (String, String) {
+    match name.trim().split_once(' ') {
+        Some((first, last)) => (first.to_owned(), last.trim().to_owned()),
+        None => (name.trim().to_owned(), String::new()),
+    }
+}
 
 pub struct AuthService {
     jwt: Arc<dyn TokenGenerator>,
@@ -94,6 +103,30 @@ impl AuthService {
             .ok_or_else(|| Error::unauthorized(INVALID_REFRESH_TOKEN))
     }
 
+    /// Google owns the name and the photo, so the record is brought back in
+    /// line on every sign in. The write only happens on a real difference,
+    /// which keeps a repeat sign in from touching the row at all.
+    async fn follow_google_profile(
+        &self,
+        user: &Identity,
+        account: &GoogleAccount,
+    ) -> Result<(), Error> {
+        let (first_name, last_name) = split_name(&account.name);
+        let avatar_url = account.picture.as_deref();
+
+        if user.first_name == first_name
+            && user.last_name == last_name
+            && user.avatar_url.as_deref() == avatar_url
+        {
+            return Ok(());
+        }
+
+        self.store
+            .update_profile(user.id, &first_name, &last_name, avatar_url)
+            .await
+            .map_err(Error::unknown)
+    }
+
     async fn require_user_by_id(&self, user_id: Uuid) -> Result<Identity, Error> {
         self.store
             .find_user_by_id(user_id)
@@ -153,6 +186,8 @@ impl Auth for AuthService {
             .await
             .map_err(Error::unknown)?
             .ok_or_else(|| Error::forbidden(GOOGLE_ACCOUNT_NOT_ALLOWED))?;
+
+        self.follow_google_profile(&user, &account).await?;
 
         self.generate_tokens(&user)
     }
@@ -243,11 +278,15 @@ mod tests {
 
     const PASSWORD: &str = "Sup3r$ecret";
 
+    /// user, first name, last name, avatar url.
+    type ProfileUpdate = (Uuid, String, String, Option<String>);
+
     #[derive(Default)]
     struct FakeStore {
         users: Vec<Identity>,
         resets: Mutex<Vec<PasswordReset>>,
         password_updates: Mutex<Vec<(String, String)>>,
+        profile_updates: Mutex<Vec<ProfileUpdate>>,
         deleted_resets: Mutex<Vec<String>>,
     }
 
@@ -276,6 +315,22 @@ mod tests {
 
         async fn find_user_by_email(&self, email: &str) -> Result<Option<Identity>, sqlx::Error> {
             Ok(self.users.iter().find(|u| u.email == email).cloned())
+        }
+
+        async fn update_profile(
+            &self,
+            user_id: Uuid,
+            first_name: &str,
+            last_name: &str,
+            avatar_url: Option<&str>,
+        ) -> Result<(), sqlx::Error> {
+            self.profile_updates.lock().unwrap().push((
+                user_id,
+                first_name.to_owned(),
+                last_name.to_owned(),
+                avatar_url.map(ToOwned::to_owned),
+            ));
+            Ok(())
         }
 
         async fn create_password_reset(&self, email: &str, token: &str) -> Result<(), sqlx::Error> {
@@ -319,11 +374,26 @@ mod tests {
 
     impl FakeGoogle {
         fn answering_with(email: &str, email_verified: bool) -> Self {
+            Self::answering_as(
+                email,
+                email_verified,
+                "A Person",
+                Some("https://photo.test/a"),
+            )
+        }
+
+        fn answering_as(
+            email: &str,
+            email_verified: bool,
+            name: &str,
+            picture: Option<&str>,
+        ) -> Self {
             Self {
                 account: Some(GoogleAccount {
                     email: email.to_owned(),
                     email_verified,
-                    name: "A Person".to_owned(),
+                    name: name.to_owned(),
+                    picture: picture.map(ToOwned::to_owned),
                 }),
                 reachable: true,
             }
@@ -383,6 +453,9 @@ mod tests {
             id: Uuid::new_v4(),
             email: "admin@example.com".to_owned(),
             user_name: "admin".to_owned(),
+            first_name: "App".to_owned(),
+            last_name: "Admin".to_owned(),
+            avatar_url: None,
             password: crypto::hash_password(PASSWORD).expect("hashing should succeed"),
             roles: vec!["Admin".to_owned()],
         }
@@ -566,6 +639,76 @@ mod tests {
             claims.get("user_id").and_then(Value::as_str),
             Some(user.id.to_string().as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn the_record_follows_the_google_name_and_photo() {
+        let user = a_user();
+        let store = Arc::new(FakeStore::with_user(user.clone()));
+        let google = Arc::new(FakeGoogle::answering_as(
+            &user.email,
+            true,
+            "Ada Byron Lovelace",
+            Some("https://photo.test/ada"),
+        ));
+        let (service, _) =
+            service_with_google(store.clone(), Arc::new(FakeMailer::default()), google);
+
+        service
+            .login_with_google("a-code")
+            .await
+            .expect("the sign in should succeed");
+
+        let updates = store.profile_updates.lock().unwrap();
+        let (id, first_name, last_name, avatar_url) =
+            updates.first().expect("the profile should be written");
+
+        assert_eq!(id, &user.id);
+        assert_eq!(first_name, "Ada");
+        assert_eq!(last_name, "Byron Lovelace", "only the first space splits");
+        assert_eq!(avatar_url.as_deref(), Some("https://photo.test/ada"));
+    }
+
+    #[tokio::test]
+    async fn a_one_word_google_name_leaves_the_last_name_empty() {
+        let user = a_user();
+        let store = Arc::new(FakeStore::with_user(user.clone()));
+        let google = Arc::new(FakeGoogle::answering_as(&user.email, true, "Prince", None));
+        let (service, _) =
+            service_with_google(store.clone(), Arc::new(FakeMailer::default()), google);
+
+        service
+            .login_with_google("a-code")
+            .await
+            .expect("the sign in should succeed");
+
+        let updates = store.profile_updates.lock().unwrap();
+        let (_, first_name, last_name, avatar_url) =
+            updates.first().expect("the profile should be written");
+
+        assert_eq!(first_name, "Prince");
+        assert!(last_name.is_empty());
+        assert_eq!(avatar_url, &None);
+    }
+
+    #[tokio::test]
+    async fn a_profile_that_already_matches_is_left_alone() {
+        let mut user = a_user();
+        user.first_name = "A".to_owned();
+        user.last_name = "Person".to_owned();
+        user.avatar_url = Some("https://photo.test/a".to_owned());
+
+        let store = Arc::new(FakeStore::with_user(user.clone()));
+        let google = Arc::new(FakeGoogle::answering_with(&user.email, true));
+        let (service, _) =
+            service_with_google(store.clone(), Arc::new(FakeMailer::default()), google);
+
+        service
+            .login_with_google("a-code")
+            .await
+            .expect("the sign in should succeed");
+
+        assert!(store.profile_updates.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
