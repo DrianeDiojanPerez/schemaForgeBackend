@@ -45,11 +45,13 @@ impl Store for PostgresRbacStore {
 
     async fn get_permissions(&self, user_id: Uuid) -> Result<Vec<Permission>, sqlx::Error> {
         let rows = sqlx::query(
-            "SELECT p.resource, p.name \
+            "SELECT DISTINCT m.name AS module, p.resource, p.name \
              FROM iam.permissions p \
+             INNER JOIN iam.modules m ON m.id = p.module_id \
              INNER JOIN iam.role_has_permissions rhp ON p.id = rhp.permission_id \
              INNER JOIN iam.user_has_roles uhr ON uhr.role_id = rhp.role_id \
-             WHERE uhr.user_id = $1",
+             WHERE uhr.user_id = $1 \
+             ORDER BY module, p.name",
         )
         .bind(user_id)
         .fetch_all(self.db.pool())
@@ -58,6 +60,7 @@ impl Store for PostgresRbacStore {
         rows.into_iter()
             .map(|row| {
                 Ok(Permission {
+                    module: row.try_get("module")?,
                     resource: row.try_get("resource")?,
                     name: row.try_get("name")?,
                 })

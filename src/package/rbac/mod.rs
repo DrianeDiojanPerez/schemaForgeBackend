@@ -13,6 +13,7 @@ use uuid::Uuid;
 pub trait Engine: Send + Sync {
     async fn can(&self, user_id: Uuid, action: &str) -> bool;
     async fn can_any(&self, user_id: Uuid, actions: &[&str]) -> bool;
+    async fn permissions_of(&self, user_id: Uuid) -> Vec<Permission>;
 }
 
 pub fn split_action(action: &str) -> Option<(&str, &str)> {

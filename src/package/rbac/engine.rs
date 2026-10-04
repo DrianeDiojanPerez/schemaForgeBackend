@@ -4,7 +4,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use uuid::Uuid;
 
-use crate::package::rbac::{split_action, Engine, Store};
+use crate::package::rbac::{split_action, Engine, Permission, Store};
 
 pub struct RbacEngine {
     super_role: String,
@@ -58,6 +58,16 @@ impl Engine for RbacEngine {
         }
     }
 
+    async fn permissions_of(&self, user_id: Uuid) -> Vec<Permission> {
+        match self.store.get_permissions(user_id).await {
+            Ok(permissions) => permissions,
+            Err(error) => {
+                tracing::debug!(%error, "failed to retrieve users permissions");
+                Vec::new()
+            }
+        }
+    }
+
     async fn can_any(&self, user_id: Uuid, actions: &[&str]) -> bool {
         if self.role_bypass(user_id).await {
             tracing::debug!("user contains super role, skipping checking");
@@ -93,8 +103,6 @@ impl Engine for RbacEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use crate::package::rbac::Permission;
 
     struct FakeStore {
         roles: Vec<String>,
@@ -132,6 +140,7 @@ mod tests {
                 permissions: permissions
                     .iter()
                     .map(|(resource, name)| Permission {
+                        module: format!("{resource} Module"),
                         resource: (*resource).to_owned(),
                         name: (*name).to_owned(),
                     })
@@ -160,6 +169,26 @@ mod tests {
         let engine = engine(&["Staff"], &[("Users", "View All")]);
 
         assert!(!engine.can(Uuid::new_v4(), "Users").await);
+    }
+
+    #[tokio::test]
+    async fn lists_the_permissions_the_roles_grant() {
+        let engine = engine(&["Staff"], &[("Users", "View All"), ("Users", "Delete")]);
+
+        let permissions = engine.permissions_of(Uuid::new_v4()).await;
+
+        assert_eq!(permissions.len(), 2);
+        assert_eq!(permissions[0].module, "Users Module");
+        assert_eq!(permissions[0].name, "View All");
+    }
+
+    #[tokio::test]
+    async fn the_super_role_is_listed_by_what_it_was_granted() {
+        // The bypass lets Admin do anything, but a frontend can only show
+        // what the roles actually grant.
+        let engine = engine(&["Admin"], &[("Users", "View All")]);
+
+        assert_eq!(engine.permissions_of(Uuid::new_v4()).await.len(), 1);
     }
 
     #[tokio::test]
