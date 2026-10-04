@@ -767,7 +767,7 @@ components:
       properties:
         name: { type: string, examples: ["View All"] }
         resource: { type: string, examples: ["Users"] }
-        module: { type: string, examples: ["IAM Module"] }
+        module: { type: string, examples: ["Access & Identity Module"] }
 
     Pagination:
       type: object

@@ -867,7 +867,7 @@ async fn lists_the_seeded_permissions_with_their_module() {
         .find(|p| p.resource == "Users" && p.name == "View All")
         .expect("the seed data should contain Users.View All");
 
-    assert_eq!(view_all.module, "IAM Module");
+    assert_eq!(view_all.module, "Access & Identity Module");
 }
 
 #[tokio::test]

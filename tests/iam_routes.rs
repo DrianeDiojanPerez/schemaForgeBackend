@@ -491,7 +491,7 @@ async fn listing_permissions_returns_the_resource_and_module() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["data"][0]["name"], "View All");
     assert_eq!(body["data"][0]["resource"], "Users");
-    assert_eq!(body["data"][0]["module"], "IAM Module");
+    assert_eq!(body["data"][0]["module"], "Access & Identity Module");
     assert_eq!(body["error"], Value::Null);
 }
 

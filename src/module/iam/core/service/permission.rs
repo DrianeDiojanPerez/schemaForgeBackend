@@ -61,7 +61,7 @@ mod tests {
                 id: 1,
                 name: "View All".to_owned(),
                 resource: "Users".to_owned(),
-                module: "IAM Module".to_owned(),
+                module: "Access & Identity Module".to_owned(),
             }]),
         }));
 
