@@ -210,6 +210,61 @@ async fn an_empty_google_code_is_a_validation_failure() {
 }
 
 #[tokio::test]
+async fn the_frontend_can_read_back_the_person_behind_the_token() {
+    let server = TestServer::start().await;
+    let mut client = server.authorized_auth_client().await;
+
+    let me = client
+        .get_current_user(v1::GetCurrentUserRequest {})
+        .await
+        .expect("the caller should be readable")
+        .into_inner();
+
+    assert_eq!(me.id, server.user.id.to_string());
+    assert_eq!(me.email, server.user.email);
+    assert_eq!(me.name, "App Admin");
+    assert_eq!(me.avatar_url, "https://photo.test/admin");
+    assert_eq!(me.roles, vec!["Staff".to_owned()]);
+}
+
+#[tokio::test]
+async fn the_caller_comes_back_with_what_their_roles_grant() {
+    let server = TestServer::with_permissions(&["Schemas.View All", "Schemas.Create"]).await;
+    let mut client = server.authorized_auth_client().await;
+
+    let me = client
+        .get_current_user(v1::GetCurrentUserRequest {})
+        .await
+        .expect("the caller should be readable")
+        .into_inner();
+
+    let granted: Vec<_> = me
+        .permissions
+        .iter()
+        .map(|permission| (permission.module.as_str(), permission.name.as_str()))
+        .collect();
+
+    assert_eq!(
+        granted,
+        vec![("Schemas Module", "Create"), ("Schemas Module", "View All")],
+        "the permissions are ordered by module then name"
+    );
+}
+
+#[tokio::test]
+async fn reading_the_caller_back_without_a_token_is_refused() {
+    let server = TestServer::start().await;
+    let mut client = server.auth_client().await;
+
+    let status = client
+        .get_current_user(v1::GetCurrentUserRequest {})
+        .await
+        .expect_err("the call should fail");
+
+    assert_eq!(status.code(), Code::Unauthenticated);
+}
+
+#[tokio::test]
 async fn a_schema_call_without_a_token_never_reaches_the_handler() {
     let server = TestServer::start().await;
     let mut client = server.anonymous_schema_client().await;

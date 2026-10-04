@@ -9,6 +9,7 @@ use axum::Router;
 use crate::module::auth::adapter::handler;
 use crate::module::auth::adapter::rpc::AuthHandler;
 use crate::package::auth::Auth;
+use crate::package::rbac::Engine;
 use crate::rpc::v1::auth_service_server::AuthServiceServer;
 
 pub fn routes(auth: Arc<dyn Auth>) -> Router {
@@ -20,6 +21,6 @@ pub fn routes(auth: Arc<dyn Auth>) -> Router {
         .with_state(auth)
 }
 
-pub fn service(auth: Arc<dyn Auth>) -> AuthServiceServer<AuthHandler> {
-    AuthServiceServer::new(AuthHandler::new(auth))
+pub fn service(auth: Arc<dyn Auth>, rbac: Arc<dyn Engine>) -> AuthServiceServer<AuthHandler> {
+    AuthServiceServer::new(AuthHandler::new(auth, rbac))
 }

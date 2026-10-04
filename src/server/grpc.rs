@@ -17,7 +17,7 @@ use crate::server::Modules;
 fn mount(modules: &Modules) -> Routes {
     Routes::default()
         .add_service(health::service())
-        .add_service(auth::service(modules.auth.clone()))
+        .add_service(auth::service(modules.auth.clone(), modules.rbac.clone()))
         .add_service(schema::service(&modules.schema))
 }
 

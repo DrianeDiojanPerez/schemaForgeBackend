@@ -36,6 +36,22 @@ message LoginWithGoogleRequest {
   string code = 1;
 }
 
+message Permission {
+  string module = 1;
+  string name = 2;
+}
+
+message GetCurrentUserRequest {}
+
+message GetCurrentUserResponse {
+  string id = 1;
+  string email = 2;
+  string name = 3;
+  string avatar_url = 4;
+  repeated string roles = 5;
+  repeated Permission permissions = 6;
+}
+
 // Where the frontend server trades credentials for tokens. Every other call
 // carries the access token this hands back in its `authorization` metadata.
 service AuthService {
@@ -47,4 +63,8 @@ service AuthService {
   // returns.
   rpc GoogleLoginUrl(GoogleLoginUrlRequest) returns (GoogleLoginUrlResponse);
   rpc LoginWithGoogle(LoginWithGoogleRequest) returns (LoginResponse);
+
+  // Who the access token belongs to, for a frontend that has to show the
+  // person it signed in. The only call on this service that needs a token.
+  rpc GetCurrentUser(GetCurrentUserRequest) returns (GetCurrentUserResponse);
 }

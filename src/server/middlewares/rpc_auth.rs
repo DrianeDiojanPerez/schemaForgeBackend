@@ -15,10 +15,12 @@ use crate::package::errdef::Error;
 use crate::package::rbac::Engine;
 
 const BEARER: &str = "Bearer ";
+const AUTH_SERVICE: &str = "/schemaforge.v1.AuthService/";
 const SCHEMA_SERVICE: &str = "/schemaforge.v1.SchemaService/";
 
 enum Access {
     Open,
+    Authenticated,
     Requires(&'static str),
     Denied,
 }
@@ -27,6 +29,15 @@ enum Access {
 /// route and this is the table. The health check, the reflection service and
 /// the calls that mint tokens are all that is reachable without a token.
 fn access_for(path: &str) -> Access {
+    if let Some(method) = path.strip_prefix(AUTH_SERVICE) {
+        return match method {
+            // Reading the caller back needs a token but no permission: every
+            // signed in person may ask who they are.
+            "GetCurrentUser" => Access::Authenticated,
+            _ => Access::Open,
+        };
+    }
+
     let Some(method) = path.strip_prefix(SCHEMA_SERVICE) else {
         return Access::Open;
     };
@@ -129,7 +140,8 @@ where
                 Access::Denied => {
                     return Ok(refuse(Error::unauthorized("unauthorized action")));
                 }
-                Access::Requires(action) => action,
+                Access::Authenticated => None,
+                Access::Requires(action) => Some(action),
             };
 
             let user = match identify(&auth, request.headers()).await {
@@ -137,8 +149,10 @@ where
                 Err(error) => return Ok(refuse(error)),
             };
 
-            if !rbac.can(user.id(), action).await {
-                return Ok(refuse(Error::unauthorized("unauthorized action")));
+            if let Some(action) = action {
+                if !rbac.can(user.id(), action).await {
+                    return Ok(refuse(Error::unauthorized("unauthorized action")));
+                }
             }
 
             // tonic copies these onto the `Request` the handler receives, so a
@@ -175,6 +189,23 @@ mod tests {
             access_for("/schemaforge.v1.AuthService/RefreshToken"),
             Access::Open
         ));
+        assert!(matches!(
+            access_for("/schemaforge.v1.AuthService/GoogleLoginUrl"),
+            Access::Open
+        ));
+        assert!(matches!(
+            access_for("/schemaforge.v1.AuthService/LoginWithGoogle"),
+            Access::Open
+        ));
+    }
+
+    #[test]
+    fn reading_the_caller_back_needs_a_token_and_nothing_more() {
+        assert!(matches!(
+            access_for("/schemaforge.v1.AuthService/GetCurrentUser"),
+            Access::Authenticated
+        ));
+        assert_eq!(action("/schemaforge.v1.AuthService/GetCurrentUser"), None);
     }
 
     #[test]

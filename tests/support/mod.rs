@@ -27,7 +27,7 @@ use schemaforge_backend::module::{auth, health, iam, schema};
 use schemaforge_backend::package::auth::{Auth, AuthenticationTokens, Identity};
 use schemaforge_backend::package::errdef::Error;
 use schemaforge_backend::package::pagination::{Data, ListRequest};
-use schemaforge_backend::package::rbac::Engine;
+use schemaforge_backend::package::rbac::{Engine, Permission as GrantedPermission};
 use schemaforge_backend::rpc::v1::auth_service_client::AuthServiceClient;
 use schemaforge_backend::rpc::v1::health_service_client::HealthServiceClient;
 use schemaforge_backend::rpc::v1::schema_service_client::SchemaServiceClient;
@@ -149,6 +149,18 @@ impl Engine for FakeRbac {
             }
         }
         false
+    }
+
+    async fn permissions_of(&self, _user_id: Uuid) -> Vec<GrantedPermission> {
+        self.allowed
+            .iter()
+            .filter_map(|allowed| allowed.split_once('.'))
+            .map(|(resource, name)| GrantedPermission {
+                module: format!("{resource} Module"),
+                resource: resource.to_owned(),
+                name: name.to_owned(),
+            })
+            .collect()
     }
 }
 
@@ -315,6 +327,9 @@ impl TestApp {
             id: user.id,
             email: user.email.clone(),
             user_name: user.user_name.clone(),
+            first_name: user.first_name.clone(),
+            last_name: user.last_name.clone(),
+            avatar_url: Some("https://photo.test/admin".to_owned()),
             password: String::new(),
             roles: vec!["Staff".to_owned()],
         };
@@ -339,7 +354,7 @@ impl TestApp {
                         id: 1,
                         name: "View All".to_owned(),
                         resource: "Users".to_owned(),
-                        module: "IAM Module".to_owned(),
+                        module: "Access & Identity Module".to_owned(),
                     }],
                 }),
             },
@@ -538,6 +553,9 @@ impl TestServer {
             id: user.id,
             email: user.email.clone(),
             user_name: user.user_name.clone(),
+            first_name: user.first_name.clone(),
+            last_name: user.last_name.clone(),
+            avatar_url: Some("https://photo.test/admin".to_owned()),
             password: String::new(),
             roles: vec!["Staff".to_owned()],
         };
@@ -553,13 +571,13 @@ impl TestServer {
         });
 
         let services = fake_schema_services();
-        let layer = AuthLayer::new(auth.clone(), rbac);
+        let layer = AuthLayer::new(auth.clone(), rbac.clone());
 
         let handle = tokio::spawn(async move {
             Server::builder()
                 .layer(layer)
                 .add_service(health::service())
-                .add_service(auth::service(auth))
+                .add_service(auth::service(auth, rbac.clone()))
                 .add_service(schema::service(&services))
                 .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
                 .await
@@ -597,6 +615,10 @@ impl TestServer {
 
     pub async fn auth_client(&self) -> AuthServiceClient<Channel> {
         AuthServiceClient::new(self.channel().await)
+    }
+
+    pub async fn authorized_auth_client(&self) -> AuthServiceClient<Authorized> {
+        AuthServiceClient::with_interceptor(self.channel().await, bearer as _)
     }
 }
 
