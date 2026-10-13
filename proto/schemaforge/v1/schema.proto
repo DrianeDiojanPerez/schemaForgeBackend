@@ -238,6 +238,8 @@ service SchemaService {
   // cannot read, or a stored id that does not exist, fails the call.
   rpc ValidateSchema(ValidateSchemaRequest) returns (ValidateSchemaResponse);
 
-  // Milestone M3. Lands in weeks 7-11.
+  // Verification runs first. An invalid schema comes back as diagnostics
+  // with an empty script rather than as a failed call, the same way
+  // ValidateSchema answers.
   rpc GenerateDdl(GenerateDdlRequest) returns (GenerateDdlResponse);
 }

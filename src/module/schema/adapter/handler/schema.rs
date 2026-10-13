@@ -396,7 +396,7 @@ mod tests {
     async fn an_unimplemented_endpoint_says_so_rather_than_returning_an_empty_result() {
         let error = generate_ddl(
             state(SpyService::failing(|| {
-                Error::unimplemented("GenerateDdl lands in milestone M3")
+                Error::unimplemented("no generator targets mysql yet")
             })),
             Json(GenerateDdlRequest {
                 schema_id: Some("s1".to_owned()),

@@ -387,7 +387,7 @@ mod tests {
     #[tokio::test]
     async fn an_unimplemented_rpc_says_so_rather_than_returning_an_empty_result() {
         let handler = handler(SpyService::failing(|| {
-            Error::unimplemented("GenerateDdl lands in milestone M3")
+            Error::unimplemented("no generator targets mysql yet")
         }));
 
         let status = handler
