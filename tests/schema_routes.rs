@@ -338,19 +338,135 @@ async fn a_stored_schema_is_validated_and_undocumented_columns_only_warn() {
     }));
 }
 
+async fn generated(app: &TestApp, schema_id: &Value, include_comments: bool) -> Value {
+    let (status, body) = app
+        .post(
+            "/v1/schemas/generate-ddl",
+            json!({
+                "schema_id": schema_id,
+                "dialect": "postgres",
+                "include_comments": include_comments,
+            }),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::OK, "generation should succeed: {body}");
+
+    body["data"].clone()
+}
+
 #[tokio::test]
-async fn generation_reports_the_milestone_it_waits_on() {
+async fn a_stored_schema_generates_postgres_ddl() {
     let app = TestApp::new();
 
-    let created = created(&app, "ungenerated").await;
+    let created = created(&app, "generated").await;
+    let generated = generated(&app, &created["id"], true).await;
+    let ddl = generated["ddl"]
+        .as_str()
+        .expect("a script should come back");
+
+    assert!(ddl.contains(r#"CREATE TABLE "students" ("#), "{ddl}");
+    assert!(ddl.contains(r#""id" UUID NOT NULL"#), "{ddl}");
+    assert!(ddl.contains(r#"PRIMARY KEY ("id")"#), "{ddl}");
+    assert!(
+        ddl.contains(concat!(
+            r#"ADD CONSTRAINT "fk_enrollments_student_id" FOREIGN KEY ("student_id") "#,
+            r#"REFERENCES "students" ("id");"#
+        )),
+        "{ddl}"
+    );
+}
+
+#[tokio::test]
+async fn the_descriptions_travel_into_the_script_as_comments() {
+    let app = TestApp::new();
+
+    let created = created(&app, "documented").await;
+    let with = generated(&app, &created["id"], true).await;
+    let without = generated(&app, &created["id"], false).await;
+
+    assert!(with["ddl"]
+        .as_str()
+        .expect("a script should come back")
+        .contains(r#"COMMENT ON TABLE "students" IS 'The students table';"#));
+    assert!(!without["ddl"]
+        .as_str()
+        .expect("a script should come back")
+        .contains("COMMENT ON"));
+}
+
+#[tokio::test]
+async fn an_undocumented_column_warns_without_blocking_generation() {
+    let app = TestApp::new();
+
+    let created = created(&app, "warned").await;
+    let generated = generated(&app, &created["id"], true).await;
+
+    let diagnostics = generated["diagnostics"]
+        .as_array()
+        .expect("diagnostics should come back");
+
+    assert!(diagnostics
+        .iter()
+        .all(|diagnostic| diagnostic["severity"] == "warning"));
+    assert!(!generated["ddl"]
+        .as_str()
+        .expect("a script should come back")
+        .is_empty());
+}
+
+#[tokio::test]
+async fn a_schema_with_a_defect_comes_back_as_diagnostics_rather_than_sql() {
+    let app = TestApp::new();
+
+    let (mut entities, relationships) = course_registration();
+    entities.push(entity(
+        "e3",
+        "audit_log",
+        vec![attribute("a9", "line", "text")],
+    ));
+
+    let (status, body) = app
+        .post(
+            "/v1/schemas",
+            json!({
+                "name": "broken",
+                "description": "A table with no key",
+                "entities": entities,
+                "relationships": relationships,
+            }),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::OK, "creation should succeed: {body}");
+
+    let generated = generated(&app, &body["data"]["id"], true).await;
+
+    assert_eq!(
+        generated["ddl"].as_str(),
+        Some(""),
+        "a broken diagram produces no script: {generated}"
+    );
+    assert!(generated["diagnostics"]
+        .as_array()
+        .expect("diagnostics should come back")
+        .iter()
+        .any(|diagnostic| diagnostic["code"] == "SF-KEY-MISSING"));
+}
+
+#[tokio::test]
+async fn a_dialect_with_no_generator_reports_what_is_missing() {
+    let app = TestApp::new();
+
+    let created = created(&app, "unsupported").await;
 
     let (status, body) = app
         .post(
             "/v1/schemas/generate-ddl",
             json!({
                 "schema_id": created["id"],
-                "dialect": "postgres",
-                "include_comments": true,
+                "dialect": "mysql",
+                "include_comments": false,
             }),
         )
         .await;
@@ -359,7 +475,7 @@ async fn generation_reports_the_milestone_it_waits_on() {
     assert!(body["error"]["message"]
         .as_str()
         .expect("a message should come back")
-        .contains("M3"));
+        .contains("mysql"));
 }
 
 #[tokio::test]

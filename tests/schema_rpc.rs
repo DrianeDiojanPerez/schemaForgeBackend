@@ -424,12 +424,138 @@ async fn a_stored_schema_is_validated_and_undocumented_columns_only_warn() {
 }
 
 #[tokio::test]
-async fn generation_reports_the_milestone_it_waits_on() {
+async fn a_stored_schema_generates_postgres_ddl_over_the_wire() {
     let server = TestServer::start().await;
     let mut client = server.schema_client().await;
 
     let created = client
-        .create_schema(create_request("ungenerated"))
+        .create_schema(create_request("generated"))
+        .await
+        .expect("creation should succeed")
+        .into_inner()
+        .schema
+        .expect("a created schema should come back");
+
+    let generated = client
+        .generate_ddl(v1::GenerateDdlRequest {
+            target: Some(v1::generate_ddl_request::Target::Id(created.id)),
+            dialect: v1::Dialect::Postgres as i32,
+            include_comments: true,
+        })
+        .await
+        .expect("generation should succeed")
+        .into_inner();
+
+    assert!(
+        generated.ddl.contains(r#"CREATE TABLE "students" ("#),
+        "{}",
+        generated.ddl
+    );
+    assert!(
+        generated.ddl.contains(concat!(
+            r#"ADD CONSTRAINT "fk_enrollments_student_id" FOREIGN KEY ("student_id") "#,
+            r#"REFERENCES "students" ("id");"#
+        )),
+        "{}",
+        generated.ddl
+    );
+    assert!(
+        generated
+            .ddl
+            .contains(r#"COMMENT ON TABLE "students" IS 'The students table';"#),
+        "{}",
+        generated.ddl
+    );
+    assert!(generated
+        .diagnostics
+        .iter()
+        .all(|diagnostic| diagnostic.severity == v1::Severity::Warning as i32));
+}
+
+#[tokio::test]
+async fn an_unsaved_draft_generates_without_being_stored() {
+    let server = TestServer::start().await;
+    let mut client = server.schema_client().await;
+
+    let (entities, relationships) = course_registration();
+
+    let generated = client
+        .generate_ddl(v1::GenerateDdlRequest {
+            target: Some(v1::generate_ddl_request::Target::Draft(v1::Schema {
+                id: String::new(),
+                name: "draft".to_owned(),
+                description: String::new(),
+                entities,
+                relationships,
+                created_at: String::new(),
+                updated_at: String::new(),
+            })),
+            dialect: v1::Dialect::Postgres as i32,
+            include_comments: false,
+        })
+        .await
+        .expect("generation should succeed")
+        .into_inner();
+
+    assert!(generated.ddl.contains(r#"CREATE TABLE "enrollments" ("#));
+    assert!(!generated.ddl.contains("COMMENT ON"));
+
+    let listed = client
+        .list_schemas(v1::ListSchemasRequest {
+            page: 1,
+            per_page: 10,
+        })
+        .await
+        .expect("listing should succeed")
+        .into_inner();
+
+    assert!(listed.schemas.is_empty(), "the draft was never stored");
+}
+
+#[tokio::test]
+async fn a_schema_with_a_defect_comes_back_as_diagnostics_rather_than_sql() {
+    let server = TestServer::start().await;
+    let mut client = server.schema_client().await;
+
+    let (mut entities, relationships) = course_registration();
+    entities.push(entity(
+        "e3",
+        "audit_log",
+        vec![attribute("a9", "line", v1::DataTypeKind::Text)],
+    ));
+
+    let generated = client
+        .generate_ddl(v1::GenerateDdlRequest {
+            target: Some(v1::generate_ddl_request::Target::Draft(v1::Schema {
+                id: String::new(),
+                name: "broken".to_owned(),
+                description: String::new(),
+                entities,
+                relationships,
+                created_at: String::new(),
+                updated_at: String::new(),
+            })),
+            dialect: v1::Dialect::Postgres as i32,
+            include_comments: true,
+        })
+        .await
+        .expect("a broken schema is an answer, not a failure")
+        .into_inner();
+
+    assert!(generated.ddl.is_empty(), "{}", generated.ddl);
+    assert!(generated
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "SF-KEY-MISSING"));
+}
+
+#[tokio::test]
+async fn a_dialect_with_no_generator_reports_what_is_missing() {
+    let server = TestServer::start().await;
+    let mut client = server.schema_client().await;
+
+    let created = client
+        .create_schema(create_request("unsupported"))
         .await
         .expect("creation should succeed")
         .into_inner()
@@ -439,14 +565,14 @@ async fn generation_reports_the_milestone_it_waits_on() {
     let status = client
         .generate_ddl(v1::GenerateDdlRequest {
             target: Some(v1::generate_ddl_request::Target::Id(created.id)),
-            dialect: v1::Dialect::Postgres as i32,
-            include_comments: true,
+            dialect: v1::Dialect::Mysql as i32,
+            include_comments: false,
         })
         .await
-        .expect_err("the generator is not built yet");
+        .expect_err("only postgres has a generator");
 
     assert_eq!(status.code(), Code::Unimplemented);
-    assert!(status.message().contains("M3"));
+    assert!(status.message().contains("mysql"));
 }
 
 #[tokio::test]
