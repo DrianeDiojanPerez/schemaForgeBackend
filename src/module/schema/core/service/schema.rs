@@ -3,10 +3,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::module::schema::core::domain::{
-    DomainError, Report, Schema, SchemaDraft, SchemaSummary,
+    Dialect, DomainError, Report, Schema, SchemaDraft, SchemaSummary,
 };
 use crate::module::schema::core::ports::{
-    GenerateRequest, Generated, SchemaRepository, SchemaService, ValidationTarget, Verifier,
+    GenerateRequest, Generated, Generator, SchemaRepository, SchemaService, ValidationTarget,
+    Verifier,
 };
 use crate::package::errdef::Error;
 use crate::package::pagination::{Data, ListRequest};
@@ -16,14 +17,31 @@ const MAX_NAME_LENGTH: usize = 120;
 pub struct SchemaServiceImpl {
     repository: Arc<dyn SchemaRepository>,
     verifier: Arc<dyn Verifier>,
+    generators: Vec<Arc<dyn Generator>>,
 }
 
 impl SchemaServiceImpl {
-    pub fn new(repository: Arc<dyn SchemaRepository>, verifier: Arc<dyn Verifier>) -> Self {
+    pub fn new(
+        repository: Arc<dyn SchemaRepository>,
+        verifier: Arc<dyn Verifier>,
+        generators: Vec<Arc<dyn Generator>>,
+    ) -> Self {
         Self {
             repository,
             verifier,
+            generators,
         }
+    }
+
+    /// A dialect nobody has written a generator for is a gap in the tool
+    /// rather than a mistake by the caller, which is why it answers
+    /// unimplemented instead of a validation failure.
+    fn generator_for(&self, dialect: Dialect) -> Result<&dyn Generator, Error> {
+        self.generators
+            .iter()
+            .find(|generator| generator.dialect() == dialect)
+            .map(Arc::as_ref)
+            .ok_or_else(|| Error::unimplemented(format!("no generator targets {dialect} yet")))
     }
 
     /// Payload-level checks only: whether the request itself is usable. The
@@ -113,14 +131,29 @@ impl SchemaService for SchemaServiceImpl {
 
     #[tracing::instrument(name = "SchemaService.GenerateDdl", skip_all)]
     async fn generate_ddl(&self, request: GenerateRequest) -> Result<Generated, Error> {
-        let _schema = match request.target {
+        let generator = self.generator_for(request.dialect)?;
+
+        let schema = match request.target {
             ValidationTarget::Stored(id) => self.find_by_id(&id).await?,
             ValidationTarget::Draft(schema) => *schema,
         };
 
-        Err(Error::unimplemented(
-            "GenerateDdl lands in milestone M3 (weeks 7-11)",
-        ))
+        let report = self.verifier.verify(&schema);
+
+        // SQL built from a broken diagram is SQL no database would accept, so
+        // a caller who skipped validation gets the same diagnostics back in
+        // place of the script rather than something that looks usable.
+        if !report.is_valid() {
+            return Ok(Generated {
+                ddl: String::new(),
+                report,
+            });
+        }
+
+        Ok(Generated {
+            ddl: generator.generate(&schema, request.include_comments),
+            report,
+        })
     }
 }
 
@@ -132,8 +165,10 @@ mod tests {
 
     use chrono::{DateTime, Utc};
 
-    use crate::module::schema::core::domain::{diagnostic_code, Diagnostic, Dialect, Entity};
-    use crate::module::schema::core::service::SchemaVerifier;
+    use crate::module::schema::core::domain::{
+        diagnostic_code, Attribute, DataType, DataTypeKind, Diagnostic, Entity,
+    };
+    use crate::module::schema::core::service::{PostgresGenerator, SchemaVerifier};
     use crate::package::errdef::code;
 
     fn now() -> DateTime<Utc> {
@@ -255,7 +290,11 @@ mod tests {
     }
 
     fn service(repository: FakeRepository) -> SchemaServiceImpl {
-        SchemaServiceImpl::new(Arc::new(repository), Arc::new(SchemaVerifier))
+        SchemaServiceImpl::new(
+            Arc::new(repository),
+            Arc::new(SchemaVerifier),
+            vec![Arc::new(PostgresGenerator)],
+        )
     }
 
     struct SeenVerifier(Mutex<Option<String>>);
@@ -283,6 +322,29 @@ mod tests {
 
     fn stored(id: &str, name: &str) -> Schema {
         Schema::new(id, draft(name), now())
+    }
+
+    /// The smallest schema the verifier passes, so a generation test is about
+    /// the SQL rather than about getting a diagram past the checks.
+    fn blog(id: &str) -> Schema {
+        Schema::new(
+            id,
+            SchemaDraft {
+                name: "blog".to_owned(),
+                description: String::new(),
+                entities: vec![Entity::new("e1", "users")
+                    .with_description("Registered accounts")
+                    .with_attributes(vec![Attribute::new(
+                        "a1",
+                        "id",
+                        DataType::simple(DataTypeKind::Uuid),
+                    )
+                    .as_primary_key()
+                    .with_description("Surrogate key")])],
+                relationships: Vec::new(),
+            },
+            now(),
+        )
     }
 
     #[tokio::test]
@@ -459,6 +521,7 @@ mod tests {
         let service = SchemaServiceImpl::new(
             Arc::new(FakeRepository::holding(vec![stored("s1", "blog")])),
             verifier.clone(),
+            vec![Arc::new(PostgresGenerator)],
         );
 
         let report = service
@@ -481,7 +544,11 @@ mod tests {
     #[tokio::test]
     async fn a_draft_is_verified_without_being_stored() {
         let repository = Arc::new(FakeRepository::default());
-        let service = SchemaServiceImpl::new(repository.clone(), Arc::new(SchemaVerifier));
+        let service = SchemaServiceImpl::new(
+            repository.clone(),
+            Arc::new(SchemaVerifier),
+            vec![Arc::new(PostgresGenerator)],
+        );
 
         let report = service
             .validate(ValidationTarget::Draft(Box::new(stored("", "draft"))))
@@ -499,20 +566,89 @@ mod tests {
             .is_empty());
     }
 
+    fn generate(service: &SchemaServiceImpl, id: &str) -> GenerateRequest {
+        GenerateRequest {
+            target: ValidationTarget::Stored(id.to_owned()),
+            dialect: service.generators[0].dialect(),
+            include_comments: true,
+        }
+    }
+
     #[tokio::test]
-    async fn generation_reports_the_milestone_it_waits_on() {
+    async fn a_valid_schema_generates_sql_for_the_dialect_that_was_asked_for() {
+        let service = service(FakeRepository::holding(vec![blog("s1")]));
+
+        let generated = service
+            .generate_ddl(generate(&service, "s1"))
+            .await
+            .expect("generation should run");
+
+        assert!(generated.report.is_valid());
+        assert!(generated.ddl.contains("CREATE TABLE \"users\""));
+        assert!(generated.ddl.contains("COMMENT ON TABLE \"users\""));
+    }
+
+    #[tokio::test]
+    async fn a_broken_schema_comes_back_as_diagnostics_rather_than_sql() {
         let service = service(FakeRepository::holding(vec![stored("s1", "blog")]));
+
+        let generated = service
+            .generate_ddl(generate(&service, "s1"))
+            .await
+            .expect("a broken schema is an answer, not a failure");
+
+        assert!(generated.ddl.is_empty(), "got:\n{}", generated.ddl);
+        assert!(generated.report.has(diagnostic_code::MISSING_PRIMARY_KEY));
+    }
+
+    #[tokio::test]
+    async fn an_undocumented_schema_still_generates() {
+        let mut schema = blog("s1");
+        schema.entities[0].description = String::new();
+
+        let service = service(FakeRepository::holding(vec![schema]));
+
+        let generated = service
+            .generate_ddl(generate(&service, "s1"))
+            .await
+            .expect("generation should run");
+
+        assert!(
+            generated.report.has(diagnostic_code::MISSING_DESCRIPTION),
+            "the warning is still reported"
+        );
+        assert!(
+            !generated.ddl.is_empty(),
+            "a warning does not block generation"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dialect_nobody_has_written_a_generator_for_says_so() {
+        let service = service(FakeRepository::holding(vec![blog("s1")]));
 
         let error = service
             .generate_ddl(GenerateRequest {
                 target: ValidationTarget::Stored("s1".to_owned()),
-                dialect: Dialect::Postgres,
-                include_comments: true,
+                dialect: Dialect::MySql,
+                include_comments: false,
             })
             .await
-            .expect_err("the generator is not built yet");
+            .expect_err("only postgres is registered");
 
         assert_eq!(error.app_code(), code::UNIMPLEMENTED);
-        assert!(error.to_string().contains("M3"));
+        assert!(error.to_string().contains("mysql"));
+    }
+
+    #[tokio::test]
+    async fn generating_from_a_missing_schema_is_a_not_found() {
+        let service = service(FakeRepository::default());
+
+        let error = service
+            .generate_ddl(generate(&service, "nope"))
+            .await
+            .expect_err("generation should fail");
+
+        assert_eq!(error.app_code(), code::NOT_FOUND);
     }
 }

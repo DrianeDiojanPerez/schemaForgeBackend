@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::database::Database;
 use crate::module::schema::adapter::repository::PgSchemaRepository;
 use crate::module::schema::core::ports::{SchemaRepository, SchemaService};
-use crate::module::schema::core::service::{SchemaServiceImpl, SchemaVerifier};
+use crate::module::schema::core::service::{PostgresGenerator, SchemaServiceImpl, SchemaVerifier};
 
 #[derive(Clone)]
 pub struct Services {
@@ -17,7 +17,11 @@ impl Services {
 
     pub fn with_repository(repository: Arc<dyn SchemaRepository>) -> Self {
         Self {
-            schema: Arc::new(SchemaServiceImpl::new(repository, Arc::new(SchemaVerifier))),
+            schema: Arc::new(SchemaServiceImpl::new(
+                repository,
+                Arc::new(SchemaVerifier),
+                vec![Arc::new(PostgresGenerator)],
+            )),
         }
     }
 }

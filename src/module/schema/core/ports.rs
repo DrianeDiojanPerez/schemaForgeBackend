@@ -36,7 +36,8 @@ pub trait SchemaService: Send + Sync {
     /// Validates a stored schema, or an unsaved draft the canvas is holding.
     async fn validate(&self, target: ValidationTarget) -> Result<Report, Error>;
 
-    /// Milestone M3: lands in weeks 7-11.
+    /// Verifies before it emits. An invalid schema comes back as diagnostics
+    /// with an empty script rather than as a failure.
     async fn generate_ddl(&self, request: GenerateRequest) -> Result<Generated, Error>;
 }
 
