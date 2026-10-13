@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use chrono::Utc;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
@@ -18,9 +19,10 @@ use schemaforge_backend::module::iam::core::service::UserServiceImpl;
 use schemaforge_backend::module::schema::adapter::repository::PgSchemaRepository;
 use schemaforge_backend::module::schema::core::domain::{
     Attribute, Cardinality, DataType, DataTypeKind, DomainError as SchemaError, Entity,
-    ForeignKeyRef, Position, Relationship, SchemaDraft, SchemaSummary,
+    ForeignKeyRef, Position, Relationship, Schema, SchemaDraft, SchemaSummary,
 };
-use schemaforge_backend::module::schema::core::ports::SchemaRepository;
+use schemaforge_backend::module::schema::core::ports::{Generator, SchemaRepository, Verifier};
+use schemaforge_backend::module::schema::core::service::{PostgresGenerator, SchemaVerifier};
 use schemaforge_backend::package::auth::{PostgresAuthStore, Store as AuthStore};
 use schemaforge_backend::package::crypto;
 use schemaforge_backend::package::pagination::ListRequest;
@@ -1225,4 +1227,87 @@ async fn a_page_past_the_end_is_empty_rather_than_an_error() {
         .expect("the listing should succeed");
 
     assert!(summaries.is_empty());
+}
+
+/// The acceptance check the proposal asks for: a real PostgreSQL runs the
+/// script, rather than a test only comparing it against an expected string.
+#[tokio::test]
+async fn a_live_postgres_accepts_the_generated_ddl() {
+    let fx = database!();
+
+    let schema = Schema::new("s1", fx.a_new_schema("emitted"), Utc::now());
+    let report = SchemaVerifier.verify(&schema);
+
+    assert!(
+        report.is_valid(),
+        "the fixture should pass the verifier first: {:?}",
+        report.errors().collect::<Vec<_>>()
+    );
+
+    let ddl = PostgresGenerator.generate(&schema, true);
+    let namespace = format!("gen_{}", fx.tag);
+
+    // One connection throughout, because the search path is what puts the
+    // unqualified names in a namespace this test can drop afterwards.
+    let mut conn = fx
+        .db
+        .pool()
+        .acquire()
+        .await
+        .expect("a connection should be free");
+
+    sqlx::raw_sql(&format!(
+        "CREATE SCHEMA \"{namespace}\"; SET search_path TO \"{namespace}\";"
+    ))
+    .execute(&mut *conn)
+    .await
+    .expect("the scratch namespace should be created");
+
+    sqlx::raw_sql(&ddl)
+        .execute(&mut *conn)
+        .await
+        .unwrap_or_else(|err| panic!("postgres refused the script: {err}\n\n{ddl}"));
+
+    let columns: Vec<String> = sqlx::query_scalar(
+        "SELECT column_name FROM information_schema.columns
+         WHERE table_schema = $1 AND table_name = 'registrations'
+         ORDER BY ordinal_position",
+    )
+    .bind(&namespace)
+    .fetch_all(&mut *conn)
+    .await
+    .expect("the columns should be readable");
+
+    assert_eq!(columns, vec!["id", "student_id", "grade"]);
+
+    let table_comment: Option<String> = sqlx::query_scalar(
+        "SELECT obj_description(format('%I.%I', $1::text, 'students')::regclass, 'pg_class')",
+    )
+    .bind(&namespace)
+    .fetch_one(&mut *conn)
+    .await
+    .expect("the table comment should be readable");
+
+    assert_eq!(
+        table_comment.as_deref(),
+        Some("Everyone enrolled"),
+        "the description travelled into the database"
+    );
+
+    let foreign_keys: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_constraint c
+         JOIN pg_namespace n ON n.oid = c.connamespace
+         WHERE n.nspname = $1 AND c.contype = 'f'",
+    )
+    .bind(&namespace)
+    .fetch_one(&mut *conn)
+    .await
+    .expect("the constraints should be readable");
+
+    assert_eq!(foreign_keys, 1, "registrations points at students");
+
+    sqlx::raw_sql(&format!("DROP SCHEMA \"{namespace}\" CASCADE"))
+        .execute(&mut *conn)
+        .await
+        .expect("the scratch namespace should be dropped");
 }
