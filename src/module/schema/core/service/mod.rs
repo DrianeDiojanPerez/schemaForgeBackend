@@ -1,3 +1,4 @@
+pub(crate) mod exchange;
 mod generator;
 mod schema;
 mod verifier;

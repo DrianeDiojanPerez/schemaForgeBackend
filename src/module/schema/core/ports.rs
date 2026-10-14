@@ -74,6 +74,13 @@ pub struct GenerateRequest {
 }
 
 #[derive(Debug, Clone)]
+pub struct Exported {
+    pub file_name: String,
+    pub content_type: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct Generated {
     pub ddl: String,
     /// Generation refuses to run on an invalid schema, so a caller that skipped
