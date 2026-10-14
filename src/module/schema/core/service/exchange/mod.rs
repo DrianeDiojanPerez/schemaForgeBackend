@@ -1,6 +1,7 @@
 mod json;
 mod names;
 mod read;
+mod sql;
 
 #[cfg(test)]
 mod tests;
