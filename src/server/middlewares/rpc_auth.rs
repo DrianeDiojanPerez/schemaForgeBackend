@@ -188,6 +188,10 @@ mod tests {
             Access::Open
         ));
         assert!(matches!(
+            access_for("/schemaforge.v1.AuthService/Register"),
+            Access::Open
+        ));
+        assert!(matches!(
             access_for("/schemaforge.v1.AuthService/RefreshToken"),
             Access::Open
         ));

@@ -12,6 +12,12 @@ message LoginResponse {
   string refresh_token = 2;
 }
 
+message RegisterRequest {
+  string name = 1;
+  string email = 2;
+  string password = 3;
+}
+
 message RefreshTokenRequest {
   string refresh_token = 1;
 }
@@ -56,6 +62,11 @@ message GetCurrentUserResponse {
 // carries the access token this hands back in its `authorization` metadata.
 service AuthService {
   rpc Login(LoginRequest) returns (LoginResponse);
+
+  // Creates the account and signs it in, so the create account page can
+  // treat a successful sign up the same way it treats a login.
+  rpc Register(RegisterRequest) returns (LoginResponse);
+
   rpc RefreshToken(RefreshTokenRequest) returns (RefreshTokenResponse);
 
   // The frontend holds no Google settings of its own. It asks for the consent

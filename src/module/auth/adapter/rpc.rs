@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
 
-use crate::package::auth::{Auth, AuthUser};
+use crate::package::auth::{Auth, AuthUser, Registration};
 use crate::package::errdef::Error;
 use crate::package::rbac::{Engine, Permission};
 use crate::rpc::v1;
@@ -64,6 +64,30 @@ impl v1::auth_service_server::AuthService for AuthHandler {
         let tokens = self
             .service
             .generate_token(&request.email, &request.password)
+            .await?;
+
+        Ok(Response::new(v1::LoginResponse {
+            token: tokens.token,
+            refresh_token: tokens.refresh_token,
+        }))
+    }
+
+    /// Every field is checked by the service, since trimming and the email
+    /// rule belong with the sign up and not with the transport.
+    #[tracing::instrument(name = "AuthService.Register", skip_all)]
+    async fn register(
+        &self,
+        request: Request<v1::RegisterRequest>,
+    ) -> Result<Response<v1::LoginResponse>, Status> {
+        let request = request.into_inner();
+
+        let tokens = self
+            .service
+            .register(Registration {
+                name: request.name,
+                email: request.email,
+                password: request.password,
+            })
             .await?;
 
         Ok(Response::new(v1::LoginResponse {

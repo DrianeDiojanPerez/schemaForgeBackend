@@ -63,6 +63,76 @@ async fn the_frontend_server_can_trade_credentials_for_tokens() {
 }
 
 #[tokio::test]
+async fn a_sign_up_is_signed_in_and_readable_straight_away() {
+    let server = TestServer::start().await;
+    let mut client = server.auth_client().await;
+
+    let tokens = client
+        .register(v1::RegisterRequest {
+            name: "Ada Lovelace".to_owned(),
+            email: " Ada@Example.com ".to_owned(),
+            password: "Sup3r$ecret".to_owned(),
+        })
+        .await
+        .expect("the sign up should succeed")
+        .into_inner();
+
+    assert!(!tokens.token.is_empty());
+    assert!(!tokens.refresh_token.is_empty());
+
+    let me = server
+        .auth_client_with(&tokens.token)
+        .await
+        .get_current_user(v1::GetCurrentUserRequest {})
+        .await
+        .expect("the new user should be readable")
+        .into_inner();
+
+    assert_eq!(me.name, "Ada Lovelace");
+    assert_eq!(me.email, "ada@example.com");
+    assert_eq!(me.roles, vec!["Developer".to_owned()]);
+}
+
+#[tokio::test]
+async fn signing_up_with_a_taken_email_already_exists() {
+    let server = TestServer::start().await;
+    let mut client = server.auth_client().await;
+
+    let status = client
+        .register(v1::RegisterRequest {
+            name: "Someone Else".to_owned(),
+            email: server.user.email.to_uppercase(),
+            password: "Sup3r$ecret".to_owned(),
+        })
+        .await
+        .expect_err("the sign up should fail");
+
+    assert_eq!(status.code(), Code::AlreadyExists);
+    assert_eq!(
+        status.message(),
+        "an account with this email already exists"
+    );
+}
+
+#[tokio::test]
+async fn a_short_password_is_an_invalid_argument_with_a_message_to_show() {
+    let server = TestServer::start().await;
+    let mut client = server.auth_client().await;
+
+    let status = client
+        .register(v1::RegisterRequest {
+            name: "Ada Lovelace".to_owned(),
+            email: "ada@example.com".to_owned(),
+            password: "short".to_owned(),
+        })
+        .await
+        .expect_err("the sign up should fail");
+
+    assert_eq!(status.code(), Code::InvalidArgument);
+    assert_eq!(status.message(), "password must be at least 8 characters");
+}
+
+#[tokio::test]
 async fn the_wrong_password_is_refused_the_same_way_the_api_refuses_it() {
     let server = TestServer::start().await;
     let mut client = server.auth_client().await;
