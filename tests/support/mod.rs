@@ -24,7 +24,7 @@ use schemaforge_backend::module::schema::core::domain::{
 };
 use schemaforge_backend::module::schema::core::ports::SchemaRepository;
 use schemaforge_backend::module::{auth, health, iam, schema};
-use schemaforge_backend::package::auth::{Auth, AuthenticationTokens, Identity};
+use schemaforge_backend::package::auth::{Auth, AuthenticationTokens, Identity, Registration};
 use schemaforge_backend::package::errdef::Error;
 use schemaforge_backend::package::pagination::{Data, ListRequest};
 use schemaforge_backend::package::rbac::{Engine, Permission as GrantedPermission};
@@ -51,8 +51,22 @@ pub struct Calls {
     pub permission_checks: Mutex<Vec<(Uuid, String)>>,
 }
 
+/// A sign up is answered with a token that names the new user, so the
+/// identity lookup can hand the same person back on the next call.
+const SIGNED_UP: &str = "signed-up:";
+
 pub struct FakeAuth {
     pub user: Identity,
+    pub signed_up: Mutex<Vec<Identity>>,
+}
+
+impl FakeAuth {
+    pub fn for_user(user: Identity) -> Self {
+        Self {
+            user,
+            signed_up: Mutex::default(),
+        }
+    }
 }
 
 #[async_trait]
@@ -70,6 +84,43 @@ impl Auth for FakeAuth {
         }
 
         Err(Error::unauthorized("invalid username or password"))
+    }
+
+    async fn register(&self, registration: Registration) -> Result<AuthenticationTokens, Error> {
+        if registration.password.chars().count() < 8 {
+            return Err(Error::validation("password must be at least 8 characters")
+                .add_violation("password", "field must be a minimum length of 8"));
+        }
+
+        let email = registration.email.trim().to_lowercase();
+        let mut signed_up = self.signed_up.lock().unwrap();
+
+        if email == self.user.email || signed_up.iter().any(|user| user.email == email) {
+            return Err(Error::conflict("an account with this email already exists"));
+        }
+
+        let (first_name, last_name) = registration
+            .name
+            .split_once(' ')
+            .map(|(first, last)| (first.to_owned(), last.to_owned()))
+            .unwrap_or((registration.name.clone(), String::new()));
+
+        let user = Identity {
+            id: Uuid::new_v4(),
+            email: email.clone(),
+            user_name: email.clone(),
+            first_name,
+            last_name,
+            avatar_url: None,
+            password: String::new(),
+            roles: vec!["Developer".to_owned()],
+        };
+        signed_up.push(user);
+
+        Ok(AuthenticationTokens {
+            token: format!("{SIGNED_UP}{email}"),
+            refresh_token: "a-valid-refresh-token".to_owned(),
+        })
     }
 
     async fn refresh_token(&self, refresh_token: &str) -> Result<AuthenticationTokens, Error> {
@@ -103,6 +154,18 @@ impl Auth for FakeAuth {
     async fn get_identity(&self, access_token: &str) -> Result<Identity, Error> {
         if access_token == VALID_TOKEN {
             return Ok(self.user.clone());
+        }
+
+        if let Some(email) = access_token.strip_prefix(SIGNED_UP) {
+            if let Some(user) = self
+                .signed_up
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|user| user.email == email)
+            {
+                return Ok(user.clone());
+            }
         }
 
         Err(Error::unauthorized("invalid or malformed refresh token"))
@@ -337,9 +400,7 @@ impl TestApp {
         let calls = Arc::new(Calls::default());
 
         let modules = Modules {
-            auth: Arc::new(FakeAuth {
-                user: identity.clone(),
-            }),
+            auth: Arc::new(FakeAuth::for_user(identity.clone())),
             rbac: Arc::new(FakeRbac {
                 allowed: allowed.iter().map(|a| (*a).to_owned()).collect(),
                 calls: calls.clone(),
@@ -562,9 +623,7 @@ impl TestServer {
 
         let calls = Arc::new(Calls::default());
 
-        let auth: Arc<dyn Auth> = Arc::new(FakeAuth {
-            user: identity.clone(),
-        });
+        let auth: Arc<dyn Auth> = Arc::new(FakeAuth::for_user(identity.clone()));
         let rbac: Arc<dyn Engine> = Arc::new(FakeRbac {
             allowed: allowed.iter().map(|action| (*action).to_owned()).collect(),
             calls: calls.clone(),
@@ -619,6 +678,32 @@ impl TestServer {
 
     pub async fn authorized_auth_client(&self) -> AuthServiceClient<Authorized> {
         AuthServiceClient::with_interceptor(self.channel().await, bearer as _)
+    }
+
+    /// A client that signs with a token the server just handed out, for the
+    /// calls that follow a sign up.
+    pub async fn auth_client_with(
+        &self,
+        token: &str,
+    ) -> AuthServiceClient<
+        InterceptedService<
+            Channel,
+            impl FnMut(tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status>,
+        >,
+    > {
+        let value: tonic::metadata::MetadataValue<_> = format!("Bearer {token}")
+            .parse()
+            .expect("the header should build");
+
+        AuthServiceClient::with_interceptor(
+            self.channel().await,
+            move |mut request: tonic::Request<()>| {
+                request
+                    .metadata_mut()
+                    .insert("authorization", value.clone());
+                Ok(request)
+            },
+        )
     }
 }
 

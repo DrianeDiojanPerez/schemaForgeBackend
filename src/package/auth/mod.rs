@@ -21,6 +21,8 @@ pub trait Auth: Send + Sync {
         password: &str,
     ) -> Result<AuthenticationTokens, Error>;
 
+    async fn register(&self, registration: Registration) -> Result<AuthenticationTokens, Error>;
+
     async fn refresh_token(&self, refresh_token: &str) -> Result<AuthenticationTokens, Error>;
 
     fn google_login_url(&self, state: &str) -> String;

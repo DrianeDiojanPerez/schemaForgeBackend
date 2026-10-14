@@ -5,9 +5,11 @@ use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use serde_json::Value;
 use uuid::Uuid;
+use validator::ValidateEmail;
 
+use crate::database::pg_error;
 use crate::package::auth::{Auth, GoogleAccount, GoogleIdentity, Store};
-use crate::package::auth::{AuthenticationTokens, Identity};
+use crate::package::auth::{AuthenticationTokens, Identity, NewUser, Registration};
 use crate::package::crypto;
 use crate::package::emailer::Emailer;
 use crate::package::errdef::Error;
@@ -19,6 +21,24 @@ const INVALID_CREDENTIALS: &str = "invalid username or password";
 const INVALID_REFRESH_TOKEN: &str = "invalid or malformed refresh token";
 const UNVERIFIED_GOOGLE_EMAIL: &str = "the google account has no verified email address";
 const GOOGLE_ACCOUNT_NOT_ALLOWED: &str = "this google account is not allowed to use the app";
+const EMAIL_TAKEN: &str = "an account with this email already exists";
+
+const MIN_PASSWORD_LENGTH: usize = 8;
+
+/// A person who signs up on their own gets the role that lets them use the
+/// product, and nothing that lets them manage other people.
+const SIGN_UP_ROLES: &[&str] = &["Developer"];
+
+fn sign_up_roles() -> Vec<String> {
+    SIGN_UP_ROLES
+        .iter()
+        .map(|role| (*role).to_owned())
+        .collect()
+}
+
+fn clean_email(email: &str) -> String {
+    email.trim().to_lowercase()
+}
 
 /// Google hands back one name. Everything after the first space is the last
 /// name, so a person with one word for a name keeps an empty last name.
@@ -134,6 +154,42 @@ impl AuthService {
             .map_err(Error::unknown)?
             .ok_or_else(|| Error::unauthorized(INVALID_REFRESH_TOKEN))
     }
+
+    /// The status message is what the create account page shows, so the
+    /// first thing wrong is named plainly rather than buried in violations.
+    fn check_registration(registration: &Registration) -> Result<(), Error> {
+        if registration.name.trim().is_empty() {
+            return Err(Error::validation("name is required")
+                .add_violation("name", "field is required and cannot be empty"));
+        }
+
+        if !registration.email.validate_email() {
+            return Err(Error::validation("email is not a valid address")
+                .add_violation("email", "field must be of email format"));
+        }
+
+        if registration.password.chars().count() < MIN_PASSWORD_LENGTH {
+            return Err(Error::validation(format!(
+                "password must be at least {MIN_PASSWORD_LENGTH} characters"
+            ))
+            .add_violation(
+                "password",
+                format!("field must be a minimum length of {MIN_PASSWORD_LENGTH}"),
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+/// Two people can sign up with the same address at the same moment. The
+/// lookup catches the common case and the unique index catches the race.
+fn creation_error(err: sqlx::Error) -> Error {
+    if pg_error::is(&err, pg_error::UNIQUE_VIOLATION) {
+        Error::conflict(EMAIL_TAKEN)
+    } else {
+        Error::unknown(err)
+    }
 }
 
 #[async_trait]
@@ -156,6 +212,48 @@ impl Auth for AuthService {
             tracing::debug!("Password Comparison Failed");
             return Err(Error::unauthorized(INVALID_CREDENTIALS));
         }
+
+        self.generate_tokens(&user)
+    }
+
+    async fn register(&self, registration: Registration) -> Result<AuthenticationTokens, Error> {
+        let registration = Registration {
+            name: registration.name.trim().to_owned(),
+            email: clean_email(&registration.email),
+            password: registration.password,
+        };
+
+        Self::check_registration(&registration)?;
+
+        // A Google sign in lands in the same table, so an address that came
+        // in that way is taken too.
+        if self
+            .store
+            .find_user_by_email(&registration.email)
+            .await
+            .map_err(Error::unknown)?
+            .is_some()
+        {
+            return Err(Error::conflict(EMAIL_TAKEN));
+        }
+
+        let (first_name, last_name) = split_name(&registration.name);
+
+        let user_id = self
+            .store
+            .create_user(&NewUser {
+                user_name: registration.email.clone(),
+                email: registration.email,
+                first_name,
+                last_name,
+                avatar_url: None,
+                password: crypto::hash_password(&registration.password)?,
+                roles: sign_up_roles(),
+            })
+            .await
+            .map_err(creation_error)?;
+
+        let user = self.require_user_by_id(user_id).await?;
 
         self.generate_tokens(&user)
     }
@@ -270,7 +368,7 @@ mod tests {
 
     use async_trait::async_trait;
 
-    use crate::package::auth::{GoogleAccount, NewUser, PasswordReset};
+    use crate::package::auth::{GoogleAccount, PasswordReset};
     use crate::package::emailer::EmailerError;
     use crate::package::errdef::code;
     use crate::package::jwt::HmacTokenGenerator;
@@ -576,6 +674,101 @@ mod tests {
             .expect_err("login should fail");
 
         assert_eq!(unknown.to_string(), wrong_password.to_string());
+    }
+
+    fn a_registration(email: &str) -> Registration {
+        Registration {
+            name: "Ada Lovelace".to_owned(),
+            email: email.to_owned(),
+            password: "Sup3r$ecret".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn signing_up_creates_the_user_and_signs_them_in() {
+        let store = Arc::new(FakeStore::default());
+        let (service, jwt) = service_with(store.clone(), Arc::new(FakeMailer::default()));
+
+        let tokens = service
+            .register(a_registration("ada@example.com"))
+            .await
+            .expect("the sign up should succeed");
+
+        let created = store.created.lock().unwrap();
+        let user = created.first().expect("the user should be stored");
+
+        assert_eq!(user.first_name, "Ada");
+        assert_eq!(user.last_name, "Lovelace");
+        assert_eq!(user.roles, vec!["Developer".to_owned()]);
+        assert_ne!(
+            user.password, "Sup3r$ecret",
+            "the hash is stored, not the password"
+        );
+        assert!(crypto::compare_hash_and_password(&user.password, "Sup3r$ecret").is_ok());
+
+        let claims = jwt
+            .validate_token(&tokens.token)
+            .expect("the access token should validate");
+        assert_eq!(
+            claims.get("user_id").and_then(Value::as_str),
+            Some(user.id.to_string().as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn signing_up_cleans_the_email_before_storing_it() {
+        let store = Arc::new(FakeStore::default());
+        let (service, _) = service_with(store.clone(), Arc::new(FakeMailer::default()));
+
+        service
+            .register(a_registration("  Ada@Example.COM "))
+            .await
+            .expect("the sign up should succeed");
+
+        let created = store.created.lock().unwrap();
+        assert_eq!(created[0].email, "ada@example.com");
+    }
+
+    #[tokio::test]
+    async fn a_taken_email_is_a_conflict_whatever_case_it_arrives_in() {
+        let store = Arc::new(FakeStore::with_user(a_user()));
+        let (service, _) = service_with(store.clone(), Arc::new(FakeMailer::default()));
+
+        let err = service
+            .register(a_registration("Admin@Example.com"))
+            .await
+            .expect_err("the sign up should fail");
+
+        assert_eq!(code_of(&err), code::RESOURCE_CONFLICT);
+        assert!(store.created.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_sign_up_is_refused_before_anything_is_written() {
+        let store = Arc::new(FakeStore::default());
+        let (service, _) = service_with(store.clone(), Arc::new(FakeMailer::default()));
+
+        let cases = [
+            ("   ", "ada@example.com", "Sup3r$ecret", "name"),
+            ("Ada", "not-an-address", "Sup3r$ecret", "email"),
+            ("Ada", "ada@example.com", "short", "password"),
+        ];
+
+        for (name, email, password, field) in cases {
+            let err = service
+                .register(Registration {
+                    name: name.to_owned(),
+                    email: email.to_owned(),
+                    password: password.to_owned(),
+                })
+                .await
+                .expect_err("the sign up should fail");
+
+            assert_eq!(code_of(&err), code::VALIDATION_FAILED, "{field}");
+            assert!(err.to_string().contains(field), "{field}: {err}");
+        }
+
+        assert!(store.created.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
