@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use crate::module::schema::core::domain::{
-    Dialect, DomainError, Report, Schema, SchemaDraft, SchemaSummary,
+    Dialect, DomainError, ExchangeFormat, Report, Schema, SchemaDraft, SchemaSummary,
 };
 use crate::package::errdef::Error;
 use crate::package::pagination::{Data, ListRequest};
@@ -43,7 +43,6 @@ impl Default for GenerateOptions {
     }
 }
 
-
 #[async_trait]
 pub trait SchemaService: Send + Sync {
     async fn index(&self, request: ListRequest) -> Result<Data<SchemaSummary>, Error>;
@@ -58,6 +57,13 @@ pub trait SchemaService: Send + Sync {
     /// Verifies before it emits. An invalid schema comes back as diagnostics
     /// with an empty script rather than as a failure.
     async fn generate_ddl(&self, request: GenerateRequest) -> Result<Generated, Error>;
+
+    /// Writes a schema out as a file the canvas can hand to the browser.
+    async fn export(&self, request: ExportRequest) -> Result<Exported, Error>;
+
+    /// Reads a file back into a draft. Nothing is stored: the canvas saves
+    /// what comes back through the rpcs it already uses.
+    async fn import(&self, request: ImportRequest) -> Result<Imported, Error>;
 }
 
 #[derive(Debug, Clone)]
@@ -74,10 +80,32 @@ pub struct GenerateRequest {
 }
 
 #[derive(Debug, Clone)]
+pub struct ExportRequest {
+    pub target: ValidationTarget,
+    pub format: ExchangeFormat,
+    pub include_positions: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct Exported {
     pub file_name: String,
     pub content_type: String,
     pub content: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportRequest {
+    pub content: String,
+    pub format: ExchangeFormat,
+    pub include_positions: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct Imported {
+    pub draft: Schema,
+    /// What the reader had to skip. A file it could only partly read still
+    /// opens, with the parts it gave up on named here.
+    pub report: Report,
 }
 
 #[derive(Debug, Clone)]

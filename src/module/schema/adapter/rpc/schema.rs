@@ -183,7 +183,9 @@ mod tests {
     use tonic::Code;
 
     use crate::module::schema::core::domain::{Report, Schema, SchemaDraft, SchemaSummary};
-    use crate::module::schema::core::ports::Generated;
+    use crate::module::schema::core::ports::{
+        ExportRequest, Exported, Generated, ImportRequest, Imported,
+    };
     use crate::package::pagination::{Data, DEFAULT_PER_PAGE};
     use v1::schema_service_server::SchemaService as _;
 
@@ -266,6 +268,25 @@ mod tests {
 
             Ok(Generated {
                 ddl: "CREATE TABLE users ();".to_owned(),
+                report: Report::default(),
+            })
+        }
+
+        async fn export(&self, _request: ExportRequest) -> Result<Exported, Error> {
+            self.guard()?;
+
+            Ok(Exported {
+                file_name: "blog.json".to_owned(),
+                content_type: "application/json".to_owned(),
+                content: "{}".to_owned(),
+            })
+        }
+
+        async fn import(&self, _request: ImportRequest) -> Result<Imported, Error> {
+            self.guard()?;
+
+            Ok(Imported {
+                draft: self.schema(),
                 report: Report::default(),
             })
         }

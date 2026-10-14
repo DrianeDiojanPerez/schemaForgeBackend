@@ -1,16 +1,19 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::Utc;
 
 use crate::module::schema::core::domain::{
     Dialect, DomainError, Report, Schema, SchemaDraft, SchemaSummary,
 };
 use crate::module::schema::core::ports::{
-    GenerateRequest, Generated, Generator, SchemaRepository, SchemaService, ValidationTarget,
-    Verifier,
+    ExportRequest, Exported, GenerateRequest, Generated, Generator, ImportRequest, Imported,
+    SchemaRepository, SchemaService, ValidationTarget, Verifier,
 };
 use crate::package::errdef::Error;
 use crate::package::pagination::{Data, ListRequest};
+
+use super::exchange;
 
 const MAX_NAME_LENGTH: usize = 120;
 
@@ -30,6 +33,13 @@ impl SchemaServiceImpl {
             repository,
             verifier,
             generators,
+        }
+    }
+
+    async fn resolve(&self, target: ValidationTarget) -> Result<Schema, Error> {
+        match target {
+            ValidationTarget::Stored(id) => self.find_by_id(&id).await,
+            ValidationTarget::Draft(schema) => Ok(*schema),
         }
     }
 
@@ -121,10 +131,7 @@ impl SchemaService for SchemaServiceImpl {
 
     #[tracing::instrument(name = "SchemaService.Validate", skip_all)]
     async fn validate(&self, target: ValidationTarget) -> Result<Report, Error> {
-        let schema = match target {
-            ValidationTarget::Stored(id) => self.find_by_id(&id).await?,
-            ValidationTarget::Draft(schema) => *schema,
-        };
+        let schema = self.resolve(target).await?;
 
         Ok(self.verifier.verify(&schema))
     }
@@ -133,11 +140,7 @@ impl SchemaService for SchemaServiceImpl {
     async fn generate_ddl(&self, request: GenerateRequest) -> Result<Generated, Error> {
         let generator = self.generator_for(request.dialect)?;
 
-        let schema = match request.target {
-            ValidationTarget::Stored(id) => self.find_by_id(&id).await?,
-            ValidationTarget::Draft(schema) => *schema,
-        };
-
+        let schema = self.resolve(request.target).await?;
         let report = self.verifier.verify(&schema);
 
         // SQL built from a broken diagram is SQL no database would accept, so
@@ -155,6 +158,29 @@ impl SchemaService for SchemaServiceImpl {
             report,
         })
     }
+
+    #[tracing::instrument(name = "SchemaService.Export", skip_all)]
+    async fn export(&self, request: ExportRequest) -> Result<Exported, Error> {
+        let schema = self.resolve(request.target).await?;
+
+        // Exporting is not generating. A half-drawn diagram is worth saving
+        // to a file and coming back to, so nothing is verified here.
+        exchange::export(&schema, request.format, request.include_positions)
+    }
+
+    #[tracing::instrument(name = "SchemaService.Import", skip_all)]
+    async fn import(&self, request: ImportRequest) -> Result<Imported, Error> {
+        let (draft, report) =
+            exchange::import(&request.content, request.format, request.include_positions)?;
+
+        // The draft has no id because nothing was stored. The canvas decides
+        // whether this becomes a schema, the same as any other diagram it is
+        // holding.
+        Ok(Imported {
+            draft: Schema::new(String::new(), draft, Utc::now()),
+            report,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -166,7 +192,7 @@ mod tests {
     use chrono::{DateTime, Utc};
 
     use crate::module::schema::core::domain::{
-        diagnostic_code, Attribute, DataType, DataTypeKind, Diagnostic, Entity,
+        diagnostic_code, Attribute, DataType, DataTypeKind, Diagnostic, Entity, ExchangeFormat,
     };
     use crate::module::schema::core::ports::GenerateOptions;
     use crate::module::schema::core::service::{PostgresGenerator, SchemaVerifier};
@@ -639,6 +665,108 @@ mod tests {
 
         assert_eq!(error.app_code(), code::UNIMPLEMENTED);
         assert!(error.to_string().contains("mysql"));
+    }
+
+    #[tokio::test]
+    async fn a_broken_schema_still_exports_because_a_file_is_not_a_database() {
+        let service = service(FakeRepository::holding(vec![stored("s1", "blog")]));
+
+        let exported = service
+            .export(ExportRequest {
+                target: ValidationTarget::Stored("s1".to_owned()),
+                format: ExchangeFormat::Json,
+                include_positions: true,
+            })
+            .await
+            .expect("export should run on a half-drawn diagram");
+
+        assert_eq!(exported.file_name, "blog.json");
+        assert!(exported.content.contains("\"schemaforge\": 1"));
+    }
+
+    #[tokio::test]
+    async fn a_draft_is_exported_without_being_stored() {
+        let repository = Arc::new(FakeRepository::default());
+        let service = SchemaServiceImpl::new(
+            repository.clone(),
+            Arc::new(SchemaVerifier),
+            vec![Arc::new(PostgresGenerator)],
+        );
+
+        let exported = service
+            .export(ExportRequest {
+                target: ValidationTarget::Draft(Box::new(blog("s1"))),
+                format: ExchangeFormat::Json,
+                include_positions: true,
+            })
+            .await
+            .expect("export should run");
+
+        assert!(exported.content.contains("\"users\""));
+        assert!(repository
+            .schemas
+            .lock()
+            .expect("the lock should be held")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn exporting_a_missing_schema_is_a_not_found() {
+        let service = service(FakeRepository::default());
+
+        let error = service
+            .export(ExportRequest {
+                target: ValidationTarget::Stored("nope".to_owned()),
+                format: ExchangeFormat::Json,
+                include_positions: true,
+            })
+            .await
+            .expect_err("export should fail");
+
+        assert_eq!(error.app_code(), code::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn an_imported_file_comes_back_as_a_draft_with_no_id() {
+        let repository = Arc::new(FakeRepository::default());
+        let service = SchemaServiceImpl::new(
+            repository.clone(),
+            Arc::new(SchemaVerifier),
+            vec![Arc::new(PostgresGenerator)],
+        );
+
+        let imported = service
+            .import(ImportRequest {
+                content: r#"{ "name": "blog", "entities": [] }"#.to_owned(),
+                format: ExchangeFormat::Json,
+                include_positions: true,
+            })
+            .await
+            .expect("the file should load");
+
+        assert_eq!(imported.draft.name, "blog");
+        assert!(imported.draft.id.is_empty(), "nothing was stored");
+        assert!(repository
+            .schemas
+            .lock()
+            .expect("the lock should be held")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_file_the_reader_cannot_make_sense_of_is_refused() {
+        let service = service(FakeRepository::default());
+
+        let error = service
+            .import(ImportRequest {
+                content: "not a schema".to_owned(),
+                format: ExchangeFormat::Json,
+                include_positions: true,
+            })
+            .await
+            .expect_err("the file should be refused");
+
+        assert_eq!(error.app_code(), code::VALIDATION_FAILED);
     }
 
     #[tokio::test]
