@@ -218,7 +218,12 @@ message GenerateDdlRequest {
   Dialect dialect = 3;
   // Emit COMMENT ON statements carrying the descriptions.
   bool include_comments = 4;
+  // Append the canvas layout as SQL comments. Optional rather than a plain
+  // bool so a client that says nothing still gets it, which is what a round
+  // trip through SQL needs to keep the diagram.
+  optional bool include_positions = 5;
 }
+
 
 message GenerateDdlResponse {
   string ddl = 1;

@@ -532,3 +532,50 @@ async fn a_validation_without_a_target_is_refused() {
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(body["error"]["errors"].get("schema_id").is_some());
 }
+
+#[tokio::test]
+async fn a_client_that_says_nothing_about_positions_still_gets_the_layout() {
+    let app = TestApp::new();
+
+    let created = created(&app, "positioned").await;
+
+    let (status, body) = app
+        .post(
+            "/v1/schemas/generate-ddl",
+            json!({ "schema_id": created["id"], "dialect": "postgres" }),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body["data"]["ddl"]
+            .as_str()
+            .expect("a script should come back")
+            .contains("-- @schemaforge layout 1\n-- @table \"students\" 40 80"),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn positions_can_be_left_out_of_the_script() {
+    let app = TestApp::new();
+
+    let created = created(&app, "unpositioned").await;
+
+    let (status, body) = app
+        .post(
+            "/v1/schemas/generate-ddl",
+            json!({
+                "schema_id": created["id"],
+                "dialect": "postgres",
+                "include_positions": false,
+            }),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!body["data"]["ddl"]
+        .as_str()
+        .expect("a script should come back")
+        .contains("@schemaforge layout"));
+}

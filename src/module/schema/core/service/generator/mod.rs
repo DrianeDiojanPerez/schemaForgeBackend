@@ -1,12 +1,13 @@
 mod comment;
 mod constraint;
+mod layout;
 mod table;
 
 #[cfg(test)]
 mod tests;
 
 use crate::module::schema::core::domain::{Dialect, Schema};
-use crate::module::schema::core::ports::Generator;
+use crate::module::schema::core::ports::{GenerateOptions, Generator};
 
 pub struct PostgresGenerator;
 
@@ -15,17 +16,23 @@ impl Generator for PostgresGenerator {
         Dialect::Postgres
     }
 
-    fn generate(&self, schema: &Schema, include_comments: bool) -> String {
+    fn generate(&self, schema: &Schema, options: GenerateOptions) -> String {
         let mut blocks: Vec<String> = schema.entities.iter().map(table::create_table).collect();
 
         blocks.extend(constraint::foreign_keys(schema));
 
-        if include_comments {
+        if options.include_comments {
             let documentation = comment::comments(schema);
 
             if !documentation.is_empty() {
                 blocks.push(documentation.join("\n"));
             }
+        }
+
+        // A script with nothing in it stays empty, so a caller cannot mistake
+        // a layout block on its own for a schema.
+        if options.include_positions && !blocks.is_empty() {
+            blocks.push(layout::layout(schema));
         }
 
         blocks.join("\n\n")

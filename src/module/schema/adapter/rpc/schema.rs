@@ -3,7 +3,9 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
 use crate::module::schema::adapter::rpc::mapper;
-use crate::module::schema::core::ports::{GenerateRequest, SchemaService, ValidationTarget};
+use crate::module::schema::core::ports::{
+    GenerateOptions, GenerateRequest, SchemaService, ValidationTarget,
+};
 use crate::package::errdef::Error;
 use crate::package::pagination::ListRequest;
 use crate::rpc::v1;
@@ -159,7 +161,10 @@ impl v1::schema_service_server::SchemaService for SchemaHandler {
             .generate_ddl(GenerateRequest {
                 target: Self::generate_target_from(request.target)?,
                 dialect: mapper::dialect_from(request.dialect),
-                include_comments: request.include_comments,
+                options: GenerateOptions {
+                    include_comments: request.include_comments,
+                    include_positions: request.include_positions.unwrap_or(true),
+                },
             })
             .await?;
 
@@ -395,6 +400,7 @@ mod tests {
                 target: Some(v1::generate_ddl_request::Target::Id("s1".to_owned())),
                 dialect: v1::Dialect::Postgres as i32,
                 include_comments: true,
+                include_positions: None,
             }))
             .await
             .expect_err("the call should fail");

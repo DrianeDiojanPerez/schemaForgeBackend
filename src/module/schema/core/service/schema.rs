@@ -151,7 +151,7 @@ impl SchemaService for SchemaServiceImpl {
         }
 
         Ok(Generated {
-            ddl: generator.generate(&schema, request.include_comments),
+            ddl: generator.generate(&schema, request.options),
             report,
         })
     }
@@ -168,6 +168,7 @@ mod tests {
     use crate::module::schema::core::domain::{
         diagnostic_code, Attribute, DataType, DataTypeKind, Diagnostic, Entity,
     };
+    use crate::module::schema::core::ports::GenerateOptions;
     use crate::module::schema::core::service::{PostgresGenerator, SchemaVerifier};
     use crate::package::errdef::code;
 
@@ -570,7 +571,7 @@ mod tests {
         GenerateRequest {
             target: ValidationTarget::Stored(id.to_owned()),
             dialect: service.generators[0].dialect(),
-            include_comments: true,
+            options: GenerateOptions::default(),
         }
     }
 
@@ -631,7 +632,7 @@ mod tests {
             .generate_ddl(GenerateRequest {
                 target: ValidationTarget::Stored("s1".to_owned()),
                 dialect: Dialect::MySql,
-                include_comments: false,
+                options: GenerateOptions::default(),
             })
             .await
             .expect_err("only postgres is registered");

@@ -547,8 +547,9 @@ paths:
       description: |
         Send either `schema_id` or `schema`, never both.
 
-        The generator lands in milestone M3; until then the route answers
-        `501` rather than emitting incomplete SQL.
+        A schema with a defect answers `200` with an empty `ddl` and the
+        diagnostics that explain it, rather than emitting SQL no database
+        would accept. A dialect with no generator answers `501`.
       security: []
       requestBody:
         required: true
@@ -567,6 +568,12 @@ paths:
                   type: boolean
                   default: false
                   description: Carry the descriptions into the SQL as comments.
+                include_positions:
+                  type: boolean
+                  default: true
+                  description: |
+                    Append the canvas layout as SQL comments the database
+                    ignores, so the script reads back as the same diagram.
       responses:
         "200":
           description: The statements, and anything worth knowing about them.

@@ -21,7 +21,9 @@ use schemaforge_backend::module::schema::core::domain::{
     Attribute, Cardinality, DataType, DataTypeKind, DomainError as SchemaError, Entity,
     ForeignKeyRef, Position, Relationship, Schema, SchemaDraft, SchemaSummary,
 };
-use schemaforge_backend::module::schema::core::ports::{Generator, SchemaRepository, Verifier};
+use schemaforge_backend::module::schema::core::ports::{
+    GenerateOptions, Generator, SchemaRepository, Verifier,
+};
 use schemaforge_backend::module::schema::core::service::{PostgresGenerator, SchemaVerifier};
 use schemaforge_backend::package::auth::{PostgresAuthStore, Store as AuthStore};
 use schemaforge_backend::package::crypto;
@@ -1244,7 +1246,7 @@ async fn a_live_postgres_accepts_the_generated_ddl() {
         report.errors().collect::<Vec<_>>()
     );
 
-    let ddl = PostgresGenerator.generate(&schema, true);
+    let ddl = PostgresGenerator.generate(&schema, GenerateOptions::default());
     let namespace = format!("gen_{}", fx.tag);
 
     // One connection throughout, because the search path is what puts the

@@ -441,6 +441,7 @@ async fn a_stored_schema_generates_postgres_ddl_over_the_wire() {
             target: Some(v1::generate_ddl_request::Target::Id(created.id)),
             dialect: v1::Dialect::Postgres as i32,
             include_comments: true,
+            include_positions: None,
         })
         .await
         .expect("generation should succeed")
@@ -492,6 +493,7 @@ async fn an_unsaved_draft_generates_without_being_stored() {
             })),
             dialect: v1::Dialect::Postgres as i32,
             include_comments: false,
+            include_positions: None,
         })
         .await
         .expect("generation should succeed")
@@ -537,6 +539,7 @@ async fn a_schema_with_a_defect_comes_back_as_diagnostics_rather_than_sql() {
             })),
             dialect: v1::Dialect::Postgres as i32,
             include_comments: true,
+            include_positions: None,
         })
         .await
         .expect("a broken schema is an answer, not a failure")
@@ -567,6 +570,7 @@ async fn a_dialect_with_no_generator_reports_what_is_missing() {
             target: Some(v1::generate_ddl_request::Target::Id(created.id)),
             dialect: v1::Dialect::Mysql as i32,
             include_comments: false,
+            include_positions: None,
         })
         .await
         .expect_err("only postgres has a generator");
@@ -629,4 +633,51 @@ async fn an_unsaved_draft_can_be_validated_without_being_stored() {
         .into_inner();
 
     assert_eq!(listed.total, 0, "validating a draft must not store it");
+}
+
+#[tokio::test]
+async fn the_layout_rides_along_unless_the_caller_turns_it_off() {
+    let server = TestServer::start().await;
+    let mut client = server.schema_client().await;
+
+    let created = client
+        .create_schema(create_request("positioned"))
+        .await
+        .expect("creation should succeed")
+        .into_inner()
+        .schema
+        .expect("a created schema should come back");
+
+    let request = |include_positions: Option<bool>| v1::GenerateDdlRequest {
+        target: Some(v1::generate_ddl_request::Target::Id(created.id.clone())),
+        dialect: v1::Dialect::Postgres as i32,
+        include_comments: false,
+        include_positions,
+    };
+
+    let silent = client
+        .generate_ddl(request(None))
+        .await
+        .expect("generation should succeed")
+        .into_inner();
+
+    assert!(
+        silent
+            .ddl
+            .contains("-- @schemaforge layout 1\n-- @table \"students\" 40 80"),
+        "{}",
+        silent.ddl
+    );
+
+    let without = client
+        .generate_ddl(request(Some(false)))
+        .await
+        .expect("generation should succeed")
+        .into_inner();
+
+    assert!(
+        !without.ddl.contains("@schemaforge layout"),
+        "{}",
+        without.ddl
+    );
 }

@@ -22,8 +22,27 @@ pub trait Verifier: Send + Sync {
 
 pub trait Generator: Send + Sync {
     fn dialect(&self) -> Dialect;
-    fn generate(&self, schema: &Schema, include_comments: bool) -> String;
+    fn generate(&self, schema: &Schema, options: GenerateOptions) -> String;
 }
+
+#[derive(Debug, Clone, Copy)]
+pub struct GenerateOptions {
+    pub include_comments: bool,
+    pub include_positions: bool,
+}
+
+/// A caller who says nothing gets both, because a script that drops the
+/// descriptions and the layout quietly loses the two things a diagram holds
+/// that a plain database schema does not.
+impl Default for GenerateOptions {
+    fn default() -> Self {
+        Self {
+            include_comments: true,
+            include_positions: true,
+        }
+    }
+}
+
 
 #[async_trait]
 pub trait SchemaService: Send + Sync {
@@ -51,7 +70,7 @@ pub enum ValidationTarget {
 pub struct GenerateRequest {
     pub target: ValidationTarget,
     pub dialect: Dialect,
-    pub include_comments: bool,
+    pub options: GenerateOptions,
 }
 
 #[derive(Debug, Clone)]

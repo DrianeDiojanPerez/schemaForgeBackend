@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use crate::module::schema::adapter::handler::mapper::{
     self, Diagnostic, Schema, SchemaPayload, SchemaSummary, Violations,
 };
-use crate::module::schema::core::ports::{GenerateRequest, SchemaService, ValidationTarget};
+use crate::module::schema::core::ports::{
+    GenerateOptions, GenerateRequest, SchemaService, ValidationTarget,
+};
 use crate::package::errdef::Error;
 use crate::package::extract::Json;
 use crate::package::pagination::ListRequest;
@@ -33,6 +35,8 @@ pub struct GenerateDdlRequest {
     pub dialect: Option<String>,
     #[serde(default)]
     pub include_comments: bool,
+    #[serde(default)]
+    pub include_positions: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -166,7 +170,10 @@ pub async fn generate_ddl(
         .generate_ddl(GenerateRequest {
             target: target_from(payload.schema_id, payload.schema)?,
             dialect: dialect.unwrap_or_default(),
-            include_comments: payload.include_comments,
+            options: GenerateOptions {
+                include_comments: payload.include_comments,
+                include_positions: payload.include_positions.unwrap_or(true),
+            },
         })
         .await?;
 
@@ -403,6 +410,7 @@ mod tests {
                 schema: None,
                 dialect: Some("postgres".to_owned()),
                 include_comments: true,
+                include_positions: None,
             }),
         )
         .await
@@ -426,6 +434,7 @@ mod tests {
                 schema: None,
                 dialect: Some("sqlite".to_owned()),
                 include_comments: false,
+                include_positions: None,
             }),
         )
         .await
