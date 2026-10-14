@@ -2,6 +2,9 @@ mod json;
 mod names;
 mod read;
 
+#[cfg(test)]
+mod tests;
+
 pub(crate) use names::{cardinality_name, kind_name};
 
 use crate::module::schema::core::domain::{ExchangeFormat, Position, Report, Schema, SchemaDraft};
