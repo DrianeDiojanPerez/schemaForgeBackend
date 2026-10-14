@@ -681,3 +681,204 @@ async fn the_layout_rides_along_unless_the_caller_turns_it_off() {
         without.ddl
     );
 }
+
+#[tokio::test]
+async fn an_unsaved_draft_is_exported_without_being_stored() {
+    let server = TestServer::start().await;
+    let mut client = server.schema_client().await;
+
+    let (entities, relationships) = course_registration();
+
+    let exported = client
+        .export_schema(v1::ExportSchemaRequest {
+            target: Some(v1::export_schema_request::Target::Draft(v1::Schema {
+                id: String::new(),
+                name: "Draft Model".to_owned(),
+                description: String::new(),
+                entities,
+                relationships,
+                created_at: String::new(),
+                updated_at: String::new(),
+            })),
+            format: v1::ExportFormat::Json as i32,
+            include_positions: None,
+        })
+        .await
+        .expect("export should succeed")
+        .into_inner();
+
+    assert_eq!(exported.file_name, "draft_model.json");
+    assert_eq!(exported.content_type, "application/json");
+    assert!(exported.content.contains("\"schemaforge\": 1"));
+    assert!(exported.content.contains("\"DATA_TYPE_KIND_UUID\""));
+
+    let listed = client
+        .list_schemas(v1::ListSchemasRequest {
+            page: 1,
+            per_page: 10,
+        })
+        .await
+        .expect("listing should succeed")
+        .into_inner();
+
+    assert!(listed.schemas.is_empty(), "the draft was never stored");
+}
+
+#[tokio::test]
+async fn exporting_a_missing_schema_is_a_not_found() {
+    let server = TestServer::start().await;
+    let mut client = server.schema_client().await;
+
+    let status = client
+        .export_schema(v1::ExportSchemaRequest {
+            target: Some(v1::export_schema_request::Target::Id("nope".to_owned())),
+            format: v1::ExportFormat::Unspecified as i32,
+            include_positions: None,
+        })
+        .await
+        .expect_err("export should fail");
+
+    assert_eq!(status.code(), Code::NotFound);
+}
+
+#[tokio::test]
+async fn a_schema_goes_out_as_a_file_and_comes_back_as_a_draft() {
+    let server = TestServer::start().await;
+    let mut client = server.schema_client().await;
+
+    let created = client
+        .create_schema(create_request("round trip"))
+        .await
+        .expect("creation should succeed")
+        .into_inner()
+        .schema
+        .expect("a created schema should come back");
+
+    let exported = client
+        .export_schema(v1::ExportSchemaRequest {
+            target: Some(v1::export_schema_request::Target::Id(created.id.clone())),
+            format: v1::ExportFormat::Json as i32,
+            include_positions: None,
+        })
+        .await
+        .expect("export should succeed")
+        .into_inner();
+
+    let imported = client
+        .import_schema(v1::ImportSchemaRequest {
+            content: exported.content,
+            format: v1::ImportFormat::Json as i32,
+            include_positions: None,
+        })
+        .await
+        .expect("import should succeed")
+        .into_inner();
+
+    let draft = imported.draft.expect("a draft should come back");
+
+    assert!(draft.id.is_empty(), "nothing was stored");
+    assert_eq!(draft.name, created.name);
+    assert_eq!(draft.entities.len(), created.entities.len());
+    assert_eq!(draft.entities[0].name, "students");
+    assert_eq!(draft.relationships.len(), 1);
+    assert!(imported.diagnostics.is_empty());
+}
+
+#[tokio::test]
+async fn a_generated_script_is_read_back_into_the_same_diagram() {
+    let server = TestServer::start().await;
+    let mut client = server.schema_client().await;
+
+    let created = client
+        .create_schema(create_request("sql round trip"))
+        .await
+        .expect("creation should succeed")
+        .into_inner()
+        .schema
+        .expect("a created schema should come back");
+
+    let generated = client
+        .generate_ddl(v1::GenerateDdlRequest {
+            target: Some(v1::generate_ddl_request::Target::Id(created.id)),
+            dialect: v1::Dialect::Postgres as i32,
+            include_comments: true,
+            include_positions: None,
+        })
+        .await
+        .expect("generation should succeed")
+        .into_inner();
+
+    let imported = client
+        .import_schema(v1::ImportSchemaRequest {
+            content: generated.ddl,
+            format: v1::ImportFormat::Sql as i32,
+            include_positions: None,
+        })
+        .await
+        .expect("import should succeed")
+        .into_inner();
+
+    let draft = imported.draft.expect("a draft should come back");
+
+    assert_eq!(draft.entities.len(), 2);
+    assert_eq!(draft.entities[0].name, "students");
+    assert_eq!(draft.entities[0].description, "The students table");
+    assert_eq!(
+        draft.entities[0]
+            .position
+            .as_ref()
+            .map(|position| position.x),
+        Some(40.0)
+    );
+    assert_eq!(draft.relationships.len(), 1);
+    assert!(
+        imported.diagnostics.is_empty(),
+        "{:?}",
+        imported.diagnostics
+    );
+}
+
+#[tokio::test]
+async fn a_script_the_reader_can_only_partly_read_still_opens() {
+    let server = TestServer::start().await;
+    let mut client = server.schema_client().await;
+
+    let imported = client
+        .import_schema(v1::ImportSchemaRequest {
+            content: "CREATE TABLE users (id uuid PRIMARY KEY);\n\
+                      CREATE INDEX users_id_idx ON users (id);"
+                .to_owned(),
+            format: v1::ImportFormat::Sql as i32,
+            include_positions: None,
+        })
+        .await
+        .expect("import should succeed")
+        .into_inner();
+
+    let draft = imported.draft.expect("a draft should come back");
+
+    assert_eq!(draft.entities.len(), 1);
+    assert_eq!(imported.diagnostics.len(), 1);
+    assert_eq!(imported.diagnostics[0].code, "SF-IMPORT-SKIPPED");
+    assert_eq!(
+        imported.diagnostics[0].severity,
+        v1::Severity::Warning as i32
+    );
+}
+
+#[tokio::test]
+async fn a_file_nobody_can_read_is_refused() {
+    let server = TestServer::start().await;
+    let mut client = server.schema_client().await;
+
+    let status = client
+        .import_schema(v1::ImportSchemaRequest {
+            content: "not a schema".to_owned(),
+            format: v1::ImportFormat::Json as i32,
+            include_positions: None,
+        })
+        .await
+        .expect_err("the file should be refused");
+
+    assert_eq!(status.code(), Code::InvalidArgument);
+}
