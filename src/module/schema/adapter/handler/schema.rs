@@ -8,7 +8,7 @@ use crate::module::schema::adapter::handler::mapper::{
     self, Diagnostic, Schema, SchemaPayload, SchemaSummary, Violations,
 };
 use crate::module::schema::core::ports::{
-    GenerateOptions, GenerateRequest, SchemaService, ValidationTarget,
+    ExportRequest, GenerateOptions, GenerateRequest, ImportRequest, SchemaService, ValidationTarget,
 };
 use crate::package::errdef::Error;
 use crate::package::extract::Json;
@@ -42,6 +42,41 @@ pub struct GenerateDdlRequest {
 #[derive(Debug, Serialize)]
 pub struct Validation {
     pub valid: bool,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExportSchemaRequest {
+    #[serde(default)]
+    pub schema_id: Option<String>,
+    #[serde(default)]
+    pub schema: Option<SchemaPayload>,
+    #[serde(default)]
+    pub format: Option<String>,
+    #[serde(default)]
+    pub include_positions: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ExportedFile {
+    pub file_name: String,
+    pub content_type: String,
+    pub content: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ImportSchemaRequest {
+    #[serde(default)]
+    pub content: String,
+    #[serde(default)]
+    pub format: Option<String>,
+    #[serde(default)]
+    pub include_positions: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ImportedSchema {
+    pub draft: Schema,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -183,6 +218,58 @@ pub async fn generate_ddl(
     }))
 }
 
+pub async fn export(
+    State(service): State<SchemaState>,
+    Json(payload): Json<ExportSchemaRequest>,
+) -> Result<AxumJson<Response<ExportedFile>>, Error> {
+    let mut violations = Violations::default();
+    let format = mapper::exchange_format_from(payload.format.as_deref(), "format", &mut violations);
+
+    violations.into_result()?;
+
+    let exported = service
+        .export(ExportRequest {
+            target: target_from(payload.schema_id, payload.schema)?,
+            format: format.unwrap_or_default(),
+            include_positions: payload.include_positions.unwrap_or(true),
+        })
+        .await?;
+
+    Ok(response::ok(ExportedFile {
+        file_name: exported.file_name,
+        content_type: exported.content_type,
+        content: exported.content,
+    }))
+}
+
+pub async fn import(
+    State(service): State<SchemaState>,
+    Json(payload): Json<ImportSchemaRequest>,
+) -> Result<AxumJson<Response<ImportedSchema>>, Error> {
+    if payload.content.trim().is_empty() {
+        return Err(Error::validation("failed payload validation")
+            .add_violation("content", "field is required and cannot be empty"));
+    }
+
+    let mut violations = Violations::default();
+    let format = mapper::exchange_format_from(payload.format.as_deref(), "format", &mut violations);
+
+    violations.into_result()?;
+
+    let imported = service
+        .import(ImportRequest {
+            content: payload.content,
+            format: format.unwrap_or_default(),
+            include_positions: payload.include_positions.unwrap_or(true),
+        })
+        .await?;
+
+    Ok(response::ok(ImportedSchema {
+        draft: Schema::from(imported.draft),
+        diagnostics: mapper::report_to(imported.report),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,9 +279,7 @@ mod tests {
     use crate::module::schema::core::domain::{
         self as domain, Report, SchemaDraft, SchemaSummary as DomainSummary,
     };
-    use crate::module::schema::core::ports::{
-        ExportRequest, Exported, Generated, ImportRequest, Imported,
-    };
+    use crate::module::schema::core::ports::{Exported, Generated, Imported};
     use crate::package::errdef::code;
     use crate::package::pagination::Data;
 

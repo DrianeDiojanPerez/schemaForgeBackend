@@ -598,6 +598,106 @@ paths:
         "501":
           $ref: "#/components/responses/NotImplemented"
 
+  /v1/schemas/export:
+    post:
+      tags: [Schemas]
+      summary: Write a stored schema or an unsaved draft out as a file
+      description: |
+        Send either `schema_id` or `schema`, never both.
+
+        Nothing is verified first: a half-drawn diagram is still worth saving
+        and coming back to.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                schema_id: { type: string }
+                schema: { $ref: "#/components/schemas/SchemaDraft" }
+                format:
+                  type: string
+                  enum: [json, sql]
+                  default: json
+                include_positions:
+                  type: boolean
+                  default: true
+      responses:
+        "200":
+          description: The file, named and typed so a browser can save it.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          file_name: { type: string }
+                          content_type: { type: string }
+                          content: { type: string }
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+
+  /v1/schemas/import:
+    post:
+      tags: [Schemas]
+      summary: Read a file back into an unsaved draft
+      description: |
+        Nothing is stored. What comes back is a draft the canvas saves through
+        `POST /v1/schemas` if the person keeps it.
+
+        A file the reader can only partly make sense of still opens: the parts
+        it gave up on come back as `SF-IMPORT-SKIPPED` warnings. A file with
+        nothing readable in it answers `422`.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content: { type: string }
+                format:
+                  type: string
+                  enum: [json, sql]
+                  default: json
+                include_positions:
+                  type: boolean
+                  default: true
+                  description: |
+                    Use the layout the file carries. With `false`, the tables
+                    are dealt into a grid instead.
+      responses:
+        "200":
+          description: The draft, and anything the reader had to skip.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          draft: { $ref: "#/components/schemas/Schema" }
+                          diagnostics:
+                            type: array
+                            items: { $ref: "#/components/schemas/Diagnostic" }
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+
   /v1/schemas/{schema-id}:
     parameters:
       - name: schema-id

@@ -17,6 +17,8 @@ pub fn routes(services: &Services) -> Router {
         .route("/v1/schemas", post(schema::create))
         .route("/v1/schemas/validate", post(schema::validate))
         .route("/v1/schemas/generate-ddl", post(schema::generate_ddl))
+        .route("/v1/schemas/export", post(schema::export))
+        .route("/v1/schemas/import", post(schema::import))
         .route("/v1/schemas/{schema-id}", get(schema::get))
         .route("/v1/schemas/{schema-id}", put(schema::replace))
         .route("/v1/schemas/{schema-id}", delete(schema::delete))

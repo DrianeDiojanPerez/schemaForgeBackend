@@ -137,6 +137,8 @@ mod tests {
             "/v1/schemas",
             "/v1/schemas/validate",
             "/v1/schemas/generate-ddl",
+            "/v1/schemas/export",
+            "/v1/schemas/import",
             "/v1/schemas/{schema-id}",
         ] {
             assert!(

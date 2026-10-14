@@ -365,6 +365,26 @@ pub fn dialect_from(
     }
 }
 
+pub fn exchange_format_from(
+    value: Option<&str>,
+    path: &str,
+    violations: &mut Violations,
+) -> Option<domain::ExchangeFormat> {
+    // JSON carries the whole model, so an unset format means it rather than
+    // an error. A named one nobody can write is an error.
+    let Some(value) = value else {
+        return Some(domain::ExchangeFormat::default());
+    };
+
+    match value.parse() {
+        Ok(format) => Some(format),
+        Err(()) => {
+            violations.add(path, "field must name a known format");
+            None
+        }
+    }
+}
+
 fn attribute_from(
     payload: Attribute,
     path: &str,
