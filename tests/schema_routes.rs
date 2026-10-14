@@ -579,3 +579,178 @@ async fn positions_can_be_left_out_of_the_script() {
         .expect("a script should come back")
         .contains("@schemaforge layout"));
 }
+
+#[tokio::test]
+async fn a_stored_schema_is_exported_as_a_json_file() {
+    let app = TestApp::new();
+
+    let created = created(&app, "course registration").await;
+
+    let (status, body) = app
+        .post("/v1/schemas/export", json!({ "schema_id": created["id"] }))
+        .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["file_name"], "course_registration.json");
+    assert_eq!(body["data"]["content_type"], "application/json");
+
+    let document: Value = serde_json::from_str(
+        body["data"]["content"]
+            .as_str()
+            .expect("the file should come back"),
+    )
+    .expect("the file should be json");
+
+    assert_eq!(document["schemaforge"], 1);
+    assert_eq!(document["name"], "course registration");
+    assert_eq!(document["entities"][0]["name"], "students");
+    assert_eq!(document["entities"][0]["position"]["x"], 40.0);
+    assert_eq!(
+        document["relationships"][0]["cardinality"],
+        "CARDINALITY_ONE_TO_MANY"
+    );
+    assert!(document.get("id").is_none(), "{document}");
+}
+
+#[tokio::test]
+async fn an_export_can_leave_the_layout_behind() {
+    let app = TestApp::new();
+
+    let created = created(&app, "flat").await;
+
+    let (status, body) = app
+        .post(
+            "/v1/schemas/export",
+            json!({ "schema_id": created["id"], "include_positions": false }),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let document: Value = serde_json::from_str(
+        body["data"]["content"]
+            .as_str()
+            .expect("the file should come back"),
+    )
+    .expect("the file should be json");
+
+    assert!(
+        document["entities"][0].get("position").is_none(),
+        "{document}"
+    );
+}
+
+#[tokio::test]
+async fn an_export_format_nobody_can_write_is_refused() {
+    let app = TestApp::new();
+
+    let created = created(&app, "unwritable").await;
+
+    let (status, body) = app
+        .post(
+            "/v1/schemas/export",
+            json!({ "schema_id": created["id"], "format": "yaml" }),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(body["error"]["errors"].get("format").is_some(), "{body}");
+}
+
+#[tokio::test]
+async fn exporting_as_sql_says_it_is_not_built_yet() {
+    let app = TestApp::new();
+
+    let created = created(&app, "sql export").await;
+
+    let (status, _) = app
+        .post(
+            "/v1/schemas/export",
+            json!({ "schema_id": created["id"], "format": "sql" }),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+}
+
+#[tokio::test]
+async fn a_schema_goes_out_as_a_file_and_comes_back_as_a_draft() {
+    let app = TestApp::new();
+
+    let created = created(&app, "round trip").await;
+    let exported = generated_file(&app, &created["id"]).await;
+
+    let (status, body) = app
+        .post(
+            "/v1/schemas/import",
+            json!({ "content": exported["content"], "format": "json" }),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let draft = &body["data"]["draft"];
+
+    assert_eq!(draft["name"], "round trip");
+    assert_eq!(draft["id"], "", "nothing was stored");
+    assert_eq!(draft["entities"][0]["name"], "students");
+    assert_eq!(draft["entities"][0]["position"]["x"], 40.0);
+    assert!(body["data"]["diagnostics"]
+        .as_array()
+        .expect("diagnostics should come back")
+        .is_empty());
+}
+
+async fn generated_file(app: &TestApp, schema_id: &Value) -> Value {
+    let (status, body) = app
+        .post("/v1/schemas/export", json!({ "schema_id": schema_id }))
+        .await;
+
+    assert_eq!(status, StatusCode::OK, "export should succeed: {body}");
+
+    body["data"].clone()
+}
+
+#[tokio::test]
+async fn a_ddl_script_is_read_back_into_a_draft() {
+    let app = TestApp::new();
+
+    let created = created(&app, "from sql").await;
+    let (status, body) = app
+        .post(
+            "/v1/schemas/generate-ddl",
+            json!({ "schema_id": created["id"], "include_comments": true }),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let ddl = body["data"]["ddl"].clone();
+    let (status, body) = app
+        .post(
+            "/v1/schemas/import",
+            json!({ "content": ddl, "format": "sql" }),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let draft = &body["data"]["draft"];
+
+    assert_eq!(draft["entities"][0]["name"], "students");
+    assert_eq!(draft["entities"][0]["description"], "The students table");
+    assert_eq!(draft["entities"][0]["position"]["x"], 40.0);
+    assert_eq!(draft["relationships"].as_array().map(Vec::len), Some(1));
+}
+
+#[tokio::test]
+async fn an_import_with_nothing_in_it_is_refused() {
+    let app = TestApp::new();
+
+    let (status, body) = app
+        .post("/v1/schemas/import", json!({ "content": "   " }))
+        .await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(body["error"]["errors"].get("content").is_some(), "{body}");
+}
