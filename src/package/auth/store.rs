@@ -4,12 +4,13 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use crate::database::Database;
-use crate::package::auth::{Identity, PasswordReset};
+use crate::package::auth::{Identity, NewUser, PasswordReset};
 
 #[async_trait]
 pub trait Store: Send + Sync {
     async fn find_user_by_id(&self, user_id: Uuid) -> Result<Option<Identity>, sqlx::Error>;
     async fn find_user_by_email(&self, email: &str) -> Result<Option<Identity>, sqlx::Error>;
+    async fn create_user(&self, user: &NewUser) -> Result<Uuid, sqlx::Error>;
     async fn update_profile(
         &self,
         user_id: Uuid,
@@ -90,6 +91,46 @@ impl Store for PostgresAuthStore {
             .await?;
 
         self.enrich(row).await
+    }
+
+    /// A sign up has no admin picking a department, so the row joins the
+    /// first one seeded. The roles go in the same transaction: a user with
+    /// no roles would sign in and be able to do nothing.
+    async fn create_user(&self, user: &NewUser) -> Result<Uuid, sqlx::Error> {
+        let mut tx = self.db.pool().begin().await?;
+
+        let row = sqlx::query(
+            "INSERT INTO iam.users \
+             (user_name, avatar_id, avatar_url, email, password, first_name, last_name, \
+              status_id, department_id) \
+             VALUES ($1, '', $2, $3, $4, $5, $6, \
+                 (SELECT id FROM iam.user_statuses WHERE status = 'Active'), \
+                 (SELECT MIN(id) FROM iam.departments)) \
+             RETURNING id",
+        )
+        .bind(&user.user_name)
+        .bind(&user.avatar_url)
+        .bind(&user.email)
+        .bind(&user.password)
+        .bind(&user.first_name)
+        .bind(&user.last_name)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        let user_id: Uuid = row.try_get("id")?;
+
+        sqlx::query(
+            "INSERT INTO iam.user_has_roles (user_id, role_id) \
+             SELECT $1, r.id FROM iam.roles r WHERE r.name = ANY($2)",
+        )
+        .bind(user_id)
+        .bind(&user.roles)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+
+        Ok(user_id)
     }
 
     async fn update_profile(

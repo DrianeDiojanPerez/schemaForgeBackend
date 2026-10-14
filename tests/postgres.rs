@@ -25,7 +25,7 @@ use schemaforge_backend::module::schema::core::ports::{
     GenerateOptions, Generator, SchemaRepository, Verifier,
 };
 use schemaforge_backend::module::schema::core::service::{PostgresGenerator, SchemaVerifier};
-use schemaforge_backend::package::auth::{PostgresAuthStore, Store as AuthStore};
+use schemaforge_backend::package::auth::{NewUser, PostgresAuthStore, Store as AuthStore};
 use schemaforge_backend::package::crypto;
 use schemaforge_backend::package::pagination::ListRequest;
 use schemaforge_backend::package::rbac::{
@@ -728,6 +728,69 @@ async fn the_auth_store_reads_a_user_with_its_roles() {
     assert_eq!(by_id.roles, vec!["Staff".to_owned()]);
     assert_eq!(by_email.id, user_id);
     assert!(!by_id.password.is_empty(), "the hash is needed to log in");
+}
+
+#[tokio::test]
+async fn the_auth_store_creates_a_sign_up_with_its_roles() {
+    let fx = database!();
+    let store = PostgresAuthStore::new(fx.db.clone());
+
+    let email = format!("signup_{}@test.local", fx.tag);
+    let user_id = store
+        .create_user(&NewUser {
+            email: email.clone(),
+            user_name: email.clone(),
+            first_name: "Ada".to_owned(),
+            last_name: "Lovelace".to_owned(),
+            avatar_url: Some("https://photo.test/ada".to_owned()),
+            password: "hashed-by-the-service".to_owned(),
+            roles: vec!["Developer".to_owned()],
+        })
+        .await
+        .expect("the sign up should be stored");
+
+    let found = store
+        .find_user_by_email(&email)
+        .await
+        .expect("the lookup should succeed")
+        .expect("the user should exist");
+
+    assert_eq!(found.id, user_id);
+    assert_eq!(found.first_name, "Ada");
+    assert_eq!(found.avatar_url.as_deref(), Some("https://photo.test/ada"));
+    assert_eq!(found.roles, vec!["Developer".to_owned()]);
+}
+
+#[tokio::test]
+async fn the_auth_store_refuses_a_second_sign_up_with_the_same_email() {
+    let fx = database!();
+    let store = PostgresAuthStore::new(fx.db.clone());
+
+    let email = format!("twice_{}@test.local", fx.tag);
+    let user = NewUser {
+        email: email.clone(),
+        user_name: email,
+        first_name: "Ada".to_owned(),
+        last_name: String::new(),
+        avatar_url: None,
+        password: "hashed-by-the-service".to_owned(),
+        roles: Vec::new(),
+    };
+
+    store
+        .create_user(&user)
+        .await
+        .expect("the first should be stored");
+
+    let err = store
+        .create_user(&user)
+        .await
+        .expect_err("the second should be refused");
+
+    assert!(schemaforge_backend::database::pg_error::is(
+        &err,
+        schemaforge_backend::database::pg_error::UNIQUE_VIOLATION
+    ));
 }
 
 #[tokio::test]

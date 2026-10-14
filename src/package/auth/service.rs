@@ -270,7 +270,7 @@ mod tests {
 
     use async_trait::async_trait;
 
-    use crate::package::auth::{GoogleAccount, PasswordReset};
+    use crate::package::auth::{GoogleAccount, NewUser, PasswordReset};
     use crate::package::emailer::EmailerError;
     use crate::package::errdef::code;
     use crate::package::jwt::HmacTokenGenerator;
@@ -284,6 +284,7 @@ mod tests {
     #[derive(Default)]
     struct FakeStore {
         users: Vec<Identity>,
+        created: Mutex<Vec<Identity>>,
         resets: Mutex<Vec<PasswordReset>>,
         password_updates: Mutex<Vec<(String, String)>>,
         profile_updates: Mutex<Vec<ProfileUpdate>>,
@@ -310,11 +311,36 @@ mod tests {
     #[async_trait]
     impl Store for FakeStore {
         async fn find_user_by_id(&self, user_id: Uuid) -> Result<Option<Identity>, sqlx::Error> {
-            Ok(self.users.iter().find(|u| u.id == user_id).cloned())
+            Ok(self
+                .users
+                .iter()
+                .chain(self.created.lock().unwrap().iter())
+                .find(|u| u.id == user_id)
+                .cloned())
         }
 
         async fn find_user_by_email(&self, email: &str) -> Result<Option<Identity>, sqlx::Error> {
-            Ok(self.users.iter().find(|u| u.email == email).cloned())
+            Ok(self
+                .users
+                .iter()
+                .chain(self.created.lock().unwrap().iter())
+                .find(|u| u.email == email)
+                .cloned())
+        }
+
+        async fn create_user(&self, user: &NewUser) -> Result<Uuid, sqlx::Error> {
+            let id = Uuid::new_v4();
+            self.created.lock().unwrap().push(Identity {
+                id,
+                email: user.email.clone(),
+                user_name: user.user_name.clone(),
+                first_name: user.first_name.clone(),
+                last_name: user.last_name.clone(),
+                avatar_url: user.avatar_url.clone(),
+                password: user.password.clone(),
+                roles: user.roles.clone(),
+            });
+            Ok(id)
         }
 
         async fn update_profile(

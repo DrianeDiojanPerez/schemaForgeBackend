@@ -31,6 +31,25 @@ pub struct AuthenticationTokens {
 }
 
 #[derive(Debug, Clone)]
+pub struct Registration {
+    pub name: String,
+    pub email: String,
+    pub password: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewUser {
+    pub email: String,
+    pub user_name: String,
+    pub first_name: String,
+    pub last_name: String,
+    pub avatar_url: Option<String>,
+    /// Already hashed, or empty for an account made by a Google sign in.
+    pub password: String,
+    pub roles: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct PasswordReset {
     pub email: String,
     pub token: String,
