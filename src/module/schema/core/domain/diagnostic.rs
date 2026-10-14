@@ -30,6 +30,9 @@ pub mod code {
 
     // Soft, non-blocking.
     pub const MISSING_DESCRIPTION: &str = "SF-DOC-MISSING";
+    /// Part of an imported file the reader could not turn into anything on
+    /// the canvas. The rest of the file still opens.
+    pub const IMPORT_SKIPPED: &str = "SF-IMPORT-SKIPPED";
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

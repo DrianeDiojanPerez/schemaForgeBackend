@@ -3,6 +3,7 @@ mod data_type;
 mod diagnostic;
 mod dialect;
 mod entity;
+mod exchange;
 mod relationship;
 mod schema;
 
@@ -11,6 +12,7 @@ pub use data_type::{DataType, DataTypeKind, TypeFamily};
 pub use diagnostic::{code as diagnostic_code, Diagnostic, Report, Severity};
 pub use dialect::Dialect;
 pub use entity::{Entity, Position};
+pub use exchange::ExchangeFormat;
 pub use relationship::{Cardinality, Relationship};
 pub use schema::{Schema, SchemaDraft, SchemaSummary};
 
