@@ -224,11 +224,57 @@ message GenerateDdlRequest {
   optional bool include_positions = 5;
 }
 
-
 message GenerateDdlResponse {
   string ddl = 1;
   // Generation refuses to run on an invalid schema, so a caller that skipped
   // ValidateSchema still gets the reason back rather than broken SQL.
+  repeated Diagnostic diagnostics = 2;
+}
+
+// JSON today. SQL is listed so a client can ask for it once the generator
+// grows an export path of its own.
+enum ExportFormat {
+  EXPORT_FORMAT_UNSPECIFIED = 0;
+  EXPORT_FORMAT_JSON = 1;
+  EXPORT_FORMAT_SQL = 2;
+}
+
+message ExportSchemaRequest {
+  oneof target {
+    string id = 1;
+    Schema draft = 2;
+  }
+  ExportFormat format = 3;
+  // Optional for the same reason as on GenerateDdl: a client that says
+  // nothing keeps its layout.
+  optional bool include_positions = 4;
+}
+
+message ExportSchemaResponse {
+  string file_name = 1;
+  string content_type = 2;
+  string content = 3;
+}
+
+enum ImportFormat {
+  IMPORT_FORMAT_UNSPECIFIED = 0;
+  IMPORT_FORMAT_JSON = 1;
+  IMPORT_FORMAT_SQL = 2;
+}
+
+message ImportSchemaRequest {
+  string content = 1;
+  ImportFormat format = 2;
+  // Optional for the same reason as on GenerateDdl: a client that says
+  // nothing keeps whatever layout the file carries.
+  optional bool include_positions = 3;
+}
+
+message ImportSchemaResponse {
+  // Never stored. The canvas decides whether this becomes a schema.
+  Schema draft = 1;
+  // What the reader skipped, as warnings, so a file it could only partly
+  // read still opens.
   repeated Diagnostic diagnostics = 2;
 }
 
@@ -247,4 +293,12 @@ service SchemaService {
   // with an empty script rather than as a failed call, the same way
   // ValidateSchema answers.
   rpc GenerateDdl(GenerateDdlRequest) returns (GenerateDdlResponse);
+
+  // Writes the schema out as a file. Nothing is verified first, because a
+  // half-drawn diagram is still worth saving and coming back to.
+  rpc ExportSchema(ExportSchemaRequest) returns (ExportSchemaResponse);
+
+  // Reads a file back into a draft. A file nobody can parse at all fails the
+  // call; one that is only partly readable comes back with warnings.
+  rpc ImportSchema(ImportSchemaRequest) returns (ImportSchemaResponse);
 }

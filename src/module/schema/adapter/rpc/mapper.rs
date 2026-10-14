@@ -9,8 +9,8 @@
 //! one, so a caller fixing a malformed request sees every problem at once.
 
 use crate::module::schema::core::domain::{
-    Attribute, Cardinality, DataType, DataTypeKind, Dialect, Entity, ForeignKeyRef, Position,
-    Relationship, Schema, SchemaDraft, SchemaSummary, Severity,
+    Attribute, Cardinality, DataType, DataTypeKind, Dialect, Entity, ExchangeFormat, ForeignKeyRef,
+    Position, Relationship, Schema, SchemaDraft, SchemaSummary, Severity,
 };
 use crate::module::schema::core::domain::{Diagnostic, Report};
 use crate::package::errdef::Error;
@@ -159,6 +159,22 @@ pub fn dialect_from(value: i32) -> Dialect {
         // Postgres is the committed target, so an unset dialect means it
         // rather than an error.
         _ => Dialect::Postgres,
+    }
+}
+
+pub fn exchange_format_from(value: i32) -> ExchangeFormat {
+    match v1::ExportFormat::try_from(value) {
+        Ok(v1::ExportFormat::Sql) => ExchangeFormat::Sql,
+        // JSON is the format that carries the whole model, so an unset one
+        // means it rather than an error.
+        _ => ExchangeFormat::Json,
+    }
+}
+
+pub fn import_format_from(value: i32) -> ExchangeFormat {
+    match v1::ImportFormat::try_from(value) {
+        Ok(v1::ImportFormat::Sql) => ExchangeFormat::Sql,
+        _ => ExchangeFormat::Json,
     }
 }
 
@@ -433,6 +449,8 @@ pub fn report_to(report: Report) -> Vec<v1::Diagnostic> {
 mod tests {
     use super::*;
 
+    use crate::module::schema::core::service::exchange::{cardinality_name, kind_name};
+
     use crate::package::errdef::code;
 
     fn typed(kind: v1::DataTypeKind) -> Option<v1::DataType> {
@@ -697,6 +715,33 @@ mod tests {
             Dialect::Postgres
         );
         assert_eq!(dialect_from(v1::Dialect::Mysql as i32), Dialect::MySql);
+    }
+
+    /// The exchange codec spells the enums out by hand, so drift between that
+    /// table and the contract would only show up in an exported file.
+    #[test]
+    fn the_exported_enum_names_are_the_ones_the_contract_declares() {
+        for kind in DataTypeKind::VARIANTS {
+            let proto = data_type_kind_to(kind);
+
+            assert_eq!(
+                kind_name(kind),
+                proto.as_str_name(),
+                "{kind} is spelled differently in the exchange codec"
+            );
+        }
+
+        for cardinality in [
+            Cardinality::OneToOne,
+            Cardinality::OneToMany,
+            Cardinality::ManyToMany,
+        ] {
+            assert_eq!(
+                cardinality_name(cardinality),
+                cardinality_to(cardinality).as_str_name(),
+                "{cardinality} is spelled differently in the exchange codec"
+            );
+        }
     }
 
     #[test]

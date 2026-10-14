@@ -43,10 +43,12 @@ fn access_for(path: &str) -> Access {
     };
 
     match method {
-        "GetSchema" | "ListSchemas" | "ValidateSchema" | "GenerateDdl" => {
+        "GetSchema" | "ListSchemas" | "ValidateSchema" | "GenerateDdl" | "ExportSchema" => {
             Access::Requires("Schemas.View All")
         }
-        "CreateSchema" => Access::Requires("Schemas.Create"),
+        // Importing stores nothing, but the only reason to read a file is
+        // to make a schema out of it, so it needs the same permission.
+        "CreateSchema" | "ImportSchema" => Access::Requires("Schemas.Create"),
         "UpdateSchema" => Access::Requires("Schemas.Update"),
         "DeleteSchema" => Access::Requires("Schemas.Delete"),
         // A method added to the service and left off this list answers denied
@@ -227,7 +229,15 @@ mod tests {
             Some("Schemas.View All")
         );
         assert_eq!(
+            action("/schemaforge.v1.SchemaService/ExportSchema"),
+            Some("Schemas.View All")
+        );
+        assert_eq!(
             action("/schemaforge.v1.SchemaService/CreateSchema"),
+            Some("Schemas.Create")
+        );
+        assert_eq!(
+            action("/schemaforge.v1.SchemaService/ImportSchema"),
             Some("Schemas.Create")
         );
         assert_eq!(

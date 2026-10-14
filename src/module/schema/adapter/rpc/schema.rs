@@ -4,7 +4,7 @@ use tonic::{Request, Response, Status};
 
 use crate::module::schema::adapter::rpc::mapper;
 use crate::module::schema::core::ports::{
-    GenerateOptions, GenerateRequest, SchemaService, ValidationTarget,
+    ExportRequest, GenerateOptions, GenerateRequest, ImportRequest, SchemaService, ValidationTarget,
 };
 use crate::package::errdef::Error;
 use crate::package::pagination::ListRequest;
@@ -19,16 +19,29 @@ impl SchemaHandler {
         Self { service }
     }
 
+    /// Three messages carry the same choice between a stored id and a drawn
+    /// draft, and prost writes each one its own enum, so they are unpacked
+    /// into this pair before the one rule about them is applied.
+    fn target_of(id: Option<String>, draft: Option<v1::Schema>) -> Result<ValidationTarget, Error> {
+        match (id, draft) {
+            (Some(id), _) => Ok(ValidationTarget::Stored(id)),
+            (_, Some(draft)) => Ok(ValidationTarget::Draft(Box::new(
+                mapper::draft_schema_from(draft)?,
+            ))),
+            (None, None) => Err(Error::validation("failed payload validation")
+                .add_violation("target", "field is required: name either an id or a draft")),
+        }
+    }
+
     fn target_from(
         target: Option<v1::validate_schema_request::Target>,
     ) -> Result<ValidationTarget, Error> {
         match target {
-            Some(v1::validate_schema_request::Target::Id(id)) => Ok(ValidationTarget::Stored(id)),
-            Some(v1::validate_schema_request::Target::Draft(draft)) => Ok(ValidationTarget::Draft(
-                Box::new(mapper::draft_schema_from(draft)?),
-            )),
-            None => Err(Error::validation("failed payload validation")
-                .add_violation("target", "field is required: name either an id or a draft")),
+            Some(v1::validate_schema_request::Target::Id(id)) => Self::target_of(Some(id), None),
+            Some(v1::validate_schema_request::Target::Draft(draft)) => {
+                Self::target_of(None, Some(draft))
+            }
+            None => Self::target_of(None, None),
         }
     }
 
@@ -36,12 +49,23 @@ impl SchemaHandler {
         target: Option<v1::generate_ddl_request::Target>,
     ) -> Result<ValidationTarget, Error> {
         match target {
-            Some(v1::generate_ddl_request::Target::Id(id)) => Ok(ValidationTarget::Stored(id)),
-            Some(v1::generate_ddl_request::Target::Draft(draft)) => Ok(ValidationTarget::Draft(
-                Box::new(mapper::draft_schema_from(draft)?),
-            )),
-            None => Err(Error::validation("failed payload validation")
-                .add_violation("target", "field is required: name either an id or a draft")),
+            Some(v1::generate_ddl_request::Target::Id(id)) => Self::target_of(Some(id), None),
+            Some(v1::generate_ddl_request::Target::Draft(draft)) => {
+                Self::target_of(None, Some(draft))
+            }
+            None => Self::target_of(None, None),
+        }
+    }
+
+    fn export_target_from(
+        target: Option<v1::export_schema_request::Target>,
+    ) -> Result<ValidationTarget, Error> {
+        match target {
+            Some(v1::export_schema_request::Target::Id(id)) => Self::target_of(Some(id), None),
+            Some(v1::export_schema_request::Target::Draft(draft)) => {
+                Self::target_of(None, Some(draft))
+            }
+            None => Self::target_of(None, None),
         }
     }
 }
@@ -173,6 +197,51 @@ impl v1::schema_service_server::SchemaService for SchemaHandler {
             diagnostics: mapper::report_to(generated.report),
         }))
     }
+
+    #[tracing::instrument(name = "SchemaService.ExportSchema", skip_all)]
+    async fn export_schema(
+        &self,
+        request: Request<v1::ExportSchemaRequest>,
+    ) -> Result<Response<v1::ExportSchemaResponse>, Status> {
+        let request = request.into_inner();
+
+        let exported = self
+            .service
+            .export(ExportRequest {
+                target: Self::export_target_from(request.target)?,
+                format: mapper::exchange_format_from(request.format),
+                include_positions: request.include_positions.unwrap_or(true),
+            })
+            .await?;
+
+        Ok(Response::new(v1::ExportSchemaResponse {
+            file_name: exported.file_name,
+            content_type: exported.content_type,
+            content: exported.content,
+        }))
+    }
+
+    #[tracing::instrument(name = "SchemaService.ImportSchema", skip_all)]
+    async fn import_schema(
+        &self,
+        request: Request<v1::ImportSchemaRequest>,
+    ) -> Result<Response<v1::ImportSchemaResponse>, Status> {
+        let request = request.into_inner();
+
+        let imported = self
+            .service
+            .import(ImportRequest {
+                content: request.content,
+                format: mapper::import_format_from(request.format),
+                include_positions: request.include_positions.unwrap_or(true),
+            })
+            .await?;
+
+        Ok(Response::new(v1::ImportSchemaResponse {
+            draft: Some(mapper::schema_to(imported.draft)),
+            diagnostics: mapper::report_to(imported.report),
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -183,9 +252,7 @@ mod tests {
     use tonic::Code;
 
     use crate::module::schema::core::domain::{Report, Schema, SchemaDraft, SchemaSummary};
-    use crate::module::schema::core::ports::{
-        ExportRequest, Exported, Generated, ImportRequest, Imported,
-    };
+    use crate::module::schema::core::ports::{Exported, Generated, Imported};
     use crate::package::pagination::{Data, DEFAULT_PER_PAGE};
     use v1::schema_service_server::SchemaService as _;
 
