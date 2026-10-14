@@ -250,18 +250,87 @@ async fn a_code_google_rejects_is_unauthenticated() {
 }
 
 #[tokio::test]
-async fn a_google_account_without_a_user_is_denied_rather_than_signed_in() {
+async fn a_google_account_without_a_user_is_signed_up_and_readable_straight_away() {
     let server = TestServer::start().await;
     let mut client = server.auth_client().await;
 
-    let status = client
+    let tokens = client
         .login_with_google(v1::LoginWithGoogleRequest {
             code: "a-google-code-for-a-stranger".to_owned(),
         })
         .await
-        .expect_err("the sign in should fail");
+        .expect("the sign in should succeed")
+        .into_inner();
 
-    assert_eq!(status.code(), Code::PermissionDenied);
+    assert!(!tokens.token.is_empty());
+    assert!(!tokens.refresh_token.is_empty());
+
+    let me = server
+        .auth_client_with(&tokens.token)
+        .await
+        .get_current_user(v1::GetCurrentUserRequest {})
+        .await
+        .expect("the new user should be readable")
+        .into_inner();
+
+    assert_eq!(me.name, "Sam Stranger");
+    assert_eq!(me.email, "stranger@example.com");
+    assert_eq!(me.avatar_url, "https://photo.test/sam");
+    assert_eq!(me.roles, vec!["Developer".to_owned()]);
+}
+
+#[tokio::test]
+async fn a_google_account_with_a_user_signs_in_as_them_with_a_fresh_name_and_photo() {
+    let server = TestServer::start().await;
+    let mut client = server.auth_client().await;
+
+    let tokens = client
+        .login_with_google(v1::LoginWithGoogleRequest {
+            code: "a-valid-google-code".to_owned(),
+        })
+        .await
+        .expect("the sign in should succeed")
+        .into_inner();
+
+    let me = server
+        .auth_client_with(&tokens.token)
+        .await
+        .get_current_user(v1::GetCurrentUserRequest {})
+        .await
+        .expect("the caller should be readable")
+        .into_inner();
+
+    assert_eq!(
+        me.id,
+        server.user.id.to_string(),
+        "no second account is made"
+    );
+    assert_eq!(me.email, server.user.email);
+    assert_eq!(me.name, "Admin From Google");
+    assert_eq!(me.avatar_url, "https://photo.test/google-admin");
+}
+
+#[tokio::test]
+async fn a_user_made_by_google_cannot_sign_in_with_a_password() {
+    let server = TestServer::start().await;
+    let mut client = server.auth_client().await;
+
+    client
+        .login_with_google(v1::LoginWithGoogleRequest {
+            code: "a-google-code-for-a-stranger".to_owned(),
+        })
+        .await
+        .expect("the sign in should succeed");
+
+    let status = client
+        .login(v1::LoginRequest {
+            email: "stranger@example.com".to_owned(),
+            password: "anything".to_owned(),
+        })
+        .await
+        .expect_err("the login should fail");
+
+    assert_eq!(status.code(), Code::Unauthenticated);
 }
 
 #[tokio::test]

@@ -20,7 +20,6 @@ const PASSWORD_RESET_TTL_MINUTES: i64 = 15;
 const INVALID_CREDENTIALS: &str = "invalid username or password";
 const INVALID_REFRESH_TOKEN: &str = "invalid or malformed refresh token";
 const UNVERIFIED_GOOGLE_EMAIL: &str = "the google account has no verified email address";
-const GOOGLE_ACCOUNT_NOT_ALLOWED: &str = "this google account is not allowed to use the app";
 const EMAIL_TAKEN: &str = "an account with this email already exists";
 
 const MIN_PASSWORD_LENGTH: usize = 8;
@@ -155,6 +154,46 @@ impl AuthService {
             .ok_or_else(|| Error::unauthorized(INVALID_REFRESH_TOKEN))
     }
 
+    /// Two sign ins with the same new address can race. When the insert loses
+    /// to the other one, the row it lost to is the account to sign in.
+    async fn create_google_user(
+        &self,
+        email: &str,
+        account: &GoogleAccount,
+    ) -> Result<Identity, Error> {
+        let (first_name, last_name) = split_name(&account.name);
+
+        let created = self
+            .store
+            .create_user(&NewUser {
+                email: email.to_owned(),
+                user_name: email.to_owned(),
+                first_name,
+                last_name,
+                avatar_url: account.picture.clone(),
+                password: String::new(),
+                roles: sign_up_roles(),
+            })
+            .await;
+
+        match created {
+            Ok(user_id) => self.require_user_by_id(user_id).await,
+            Err(err) if pg_error::is(&err, pg_error::UNIQUE_VIOLATION) => {
+                let user = self
+                    .store
+                    .find_user_by_email(email)
+                    .await
+                    .map_err(Error::unknown)?
+                    .ok_or_else(|| Error::unknown(err))?;
+
+                self.follow_google_profile(&user, account).await?;
+
+                Ok(user)
+            }
+            Err(err) => Err(Error::unknown(err)),
+        }
+    }
+
     /// The status message is what the create account page shows, so the
     /// first thing wrong is named plainly rather than buried in violations.
     fn check_registration(registration: &Registration) -> Result<(), Error> {
@@ -208,7 +247,10 @@ impl Auth for AuthService {
             .map_err(Error::unknown)?
             .ok_or_else(|| Error::unauthorized(INVALID_CREDENTIALS))?;
 
-        if crypto::compare_hash_and_password(&user.password, password).is_err() {
+        // An account made by a Google sign in has no password to match.
+        if user.password.is_empty()
+            || crypto::compare_hash_and_password(&user.password, password).is_err()
+        {
             tracing::debug!("Password Comparison Failed");
             return Err(Error::unauthorized(INVALID_CREDENTIALS));
         }
@@ -276,16 +318,20 @@ impl Auth for AuthService {
             return Err(Error::unauthorized(UNVERIFIED_GOOGLE_EMAIL));
         }
 
-        // Google says who the person is, the user table says whether they may
-        // be here. Signing in never creates an account.
-        let user = self
+        let email = clean_email(&account.email);
+
+        let user = match self
             .store
-            .find_user_by_email(&account.email)
+            .find_user_by_email(&email)
             .await
             .map_err(Error::unknown)?
-            .ok_or_else(|| Error::forbidden(GOOGLE_ACCOUNT_NOT_ALLOWED))?;
-
-        self.follow_google_profile(&user, &account).await?;
+        {
+            Some(user) => {
+                self.follow_google_profile(&user, &account).await?;
+                user
+            }
+            None => self.create_google_user(&email, &account).await?,
+        };
 
         self.generate_tokens(&user)
     }
@@ -886,6 +932,7 @@ mod tests {
         assert_eq!(first_name, "Ada");
         assert_eq!(last_name, "Byron Lovelace", "only the first space splits");
         assert_eq!(avatar_url.as_deref(), Some("https://photo.test/ada"));
+        assert!(store.created.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -931,17 +978,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_google_account_with_no_user_is_refused() {
+    async fn a_google_account_with_no_user_becomes_one_and_is_signed_in() {
         let store = Arc::new(FakeStore::with_user(a_user()));
-        let google = Arc::new(FakeGoogle::answering_with("stranger@example.com", true));
-        let (service, _) = service_with_google(store, Arc::new(FakeMailer::default()), google);
+        let google = Arc::new(FakeGoogle::answering_as(
+            " Stranger@Example.com ",
+            true,
+            "Sam Stranger",
+            Some("https://photo.test/sam"),
+        ));
+        let (service, jwt) =
+            service_with_google(store.clone(), Arc::new(FakeMailer::default()), google);
 
-        let err = service
+        let tokens = service
             .login_with_google("a-code")
             .await
-            .expect_err("the sign in should fail");
+            .expect("the sign in should succeed");
 
-        assert_eq!(code_of(&err), code::FORBIDDEN);
+        let created = store.created.lock().unwrap();
+        let user = created.first().expect("the user should be stored");
+
+        assert_eq!(user.email, "stranger@example.com");
+        assert_eq!(user.first_name, "Sam");
+        assert_eq!(user.last_name, "Stranger");
+        assert_eq!(user.avatar_url.as_deref(), Some("https://photo.test/sam"));
+        assert_eq!(user.roles, vec!["Developer".to_owned()]);
+        assert!(user.password.is_empty());
+
+        let claims = jwt
+            .validate_token(&tokens.token)
+            .expect("the access token should validate");
+        assert_eq!(
+            claims.get("user_id").and_then(Value::as_str),
+            Some(user.id.to_string().as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_user_made_by_google_cannot_sign_in_with_a_password() {
+        let store = Arc::new(FakeStore::default());
+        let google = Arc::new(FakeGoogle::answering_with("sam@example.com", true));
+        let (service, _) =
+            service_with_google(store.clone(), Arc::new(FakeMailer::default()), google);
+
+        service
+            .login_with_google("a-code")
+            .await
+            .expect("the sign in should succeed");
+
+        for password in ["", "anything"] {
+            let err = service
+                .generate_token("sam@example.com", password)
+                .await
+                .expect_err("a password login should fail");
+
+            assert_eq!(code_of(&err), code::UNAUTHORIZED);
+            assert!(err.to_string().contains(INVALID_CREDENTIALS));
+        }
     }
 
     #[tokio::test]

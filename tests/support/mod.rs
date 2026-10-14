@@ -56,16 +56,59 @@ pub struct Calls {
 const SIGNED_UP: &str = "signed-up:";
 
 pub struct FakeAuth {
-    pub user: Identity,
+    pub user: Mutex<Identity>,
     pub signed_up: Mutex<Vec<Identity>>,
 }
 
 impl FakeAuth {
     pub fn for_user(user: Identity) -> Self {
         Self {
-            user,
+            user: Mutex::new(user),
             signed_up: Mutex::default(),
         }
+    }
+
+    /// What Google would answer for a code: email, name, picture.
+    fn google_account(&self, code: &str) -> Option<(String, &'static str, &'static str)> {
+        match code {
+            "a-valid-google-code" => Some((
+                self.user.lock().unwrap().email.clone(),
+                "Admin From Google",
+                "https://photo.test/google-admin",
+            )),
+            "a-google-code-for-a-stranger" => Some((
+                " Stranger@Example.com ".to_owned(),
+                "Sam Stranger",
+                "https://photo.test/sam",
+            )),
+            _ => None,
+        }
+    }
+}
+
+fn split_name(name: &str) -> (String, String) {
+    name.split_once(' ')
+        .map(|(first, last)| (first.to_owned(), last.to_owned()))
+        .unwrap_or((name.to_owned(), String::new()))
+}
+
+fn a_sign_up(email: &str, first_name: String, last_name: String) -> Identity {
+    Identity {
+        id: Uuid::new_v4(),
+        email: email.to_owned(),
+        user_name: email.to_owned(),
+        first_name,
+        last_name,
+        avatar_url: None,
+        password: String::new(),
+        roles: vec!["Developer".to_owned()],
+    }
+}
+
+fn signed_up_tokens(email: &str) -> AuthenticationTokens {
+    AuthenticationTokens {
+        token: format!("{SIGNED_UP}{email}"),
+        refresh_token: "a-valid-refresh-token".to_owned(),
     }
 }
 
@@ -76,7 +119,7 @@ impl Auth for FakeAuth {
         email: &str,
         password: &str,
     ) -> Result<AuthenticationTokens, Error> {
-        if email == self.user.email && password == "password" {
+        if email == self.user.lock().unwrap().email && password == "password" {
             return Ok(AuthenticationTokens {
                 token: VALID_TOKEN.to_owned(),
                 refresh_token: "a-valid-refresh-token".to_owned(),
@@ -95,32 +138,16 @@ impl Auth for FakeAuth {
         let email = registration.email.trim().to_lowercase();
         let mut signed_up = self.signed_up.lock().unwrap();
 
-        if email == self.user.email || signed_up.iter().any(|user| user.email == email) {
+        if email == self.user.lock().unwrap().email
+            || signed_up.iter().any(|user| user.email == email)
+        {
             return Err(Error::conflict("an account with this email already exists"));
         }
 
-        let (first_name, last_name) = registration
-            .name
-            .split_once(' ')
-            .map(|(first, last)| (first.to_owned(), last.to_owned()))
-            .unwrap_or((registration.name.clone(), String::new()));
+        let (first_name, last_name) = split_name(&registration.name);
+        signed_up.push(a_sign_up(&email, first_name, last_name));
 
-        let user = Identity {
-            id: Uuid::new_v4(),
-            email: email.clone(),
-            user_name: email.clone(),
-            first_name,
-            last_name,
-            avatar_url: None,
-            password: String::new(),
-            roles: vec!["Developer".to_owned()],
-        };
-        signed_up.push(user);
-
-        Ok(AuthenticationTokens {
-            token: format!("{SIGNED_UP}{email}"),
-            refresh_token: "a-valid-refresh-token".to_owned(),
-        })
+        Ok(signed_up_tokens(&email))
     }
 
     async fn refresh_token(&self, refresh_token: &str) -> Result<AuthenticationTokens, Error> {
@@ -139,21 +166,45 @@ impl Auth for FakeAuth {
     }
 
     async fn login_with_google(&self, code: &str) -> Result<AuthenticationTokens, Error> {
-        match code {
-            "a-valid-google-code" => Ok(AuthenticationTokens {
+        let (email, name, picture) = self
+            .google_account(code)
+            .ok_or_else(|| Error::unauthorized("google rejected the sign in code"))?;
+
+        let email = email.trim().to_lowercase();
+        let (first_name, last_name) = split_name(name);
+
+        let mut user = self.user.lock().unwrap();
+        if user.email == email {
+            user.first_name = first_name;
+            user.last_name = last_name;
+            user.avatar_url = Some(picture.to_owned());
+
+            return Ok(AuthenticationTokens {
                 token: VALID_TOKEN.to_owned(),
                 refresh_token: "a-valid-refresh-token".to_owned(),
-            }),
-            "a-google-code-for-a-stranger" => Err(Error::forbidden(
-                "this google account is not allowed to use the app",
-            )),
-            _ => Err(Error::unauthorized("google rejected the sign in code")),
+            });
         }
+
+        let mut signed_up = self.signed_up.lock().unwrap();
+        match signed_up.iter_mut().find(|user| user.email == email) {
+            Some(user) => {
+                user.first_name = first_name;
+                user.last_name = last_name;
+                user.avatar_url = Some(picture.to_owned());
+            }
+            None => {
+                let mut user = a_sign_up(&email, first_name, last_name);
+                user.avatar_url = Some(picture.to_owned());
+                signed_up.push(user);
+            }
+        }
+
+        Ok(signed_up_tokens(&email))
     }
 
     async fn get_identity(&self, access_token: &str) -> Result<Identity, Error> {
         if access_token == VALID_TOKEN {
-            return Ok(self.user.clone());
+            return Ok(self.user.lock().unwrap().clone());
         }
 
         if let Some(email) = access_token.strip_prefix(SIGNED_UP) {
@@ -172,7 +223,7 @@ impl Auth for FakeAuth {
     }
 
     async fn password_recovery(&self, email: &str, _callback_uri: &str) -> Result<(), Error> {
-        if email == self.user.email {
+        if email == self.user.lock().unwrap().email {
             return Ok(());
         }
 
