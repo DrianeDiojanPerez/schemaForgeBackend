@@ -3,10 +3,10 @@ mod names;
 mod read;
 mod sql;
 
+pub(crate) use names::{cardinality_name, kind_name};
+
 #[cfg(test)]
 mod tests;
-
-pub(crate) use names::{cardinality_name, kind_name};
 
 use crate::module::schema::core::domain::{ExchangeFormat, Position, Report, Schema, SchemaDraft};
 use crate::module::schema::core::ports::Exported;
@@ -50,8 +50,6 @@ pub fn import(
 ) -> Result<(SchemaDraft, Report), Error> {
     match format {
         ExchangeFormat::Json => Ok((json::read(content, include_positions)?, Report::default())),
-        ExchangeFormat::Sql => Err(Error::unimplemented(
-            "importing sql is not built yet",
-        )),
+        ExchangeFormat::Sql => sql::read(content, include_positions),
     }
 }
