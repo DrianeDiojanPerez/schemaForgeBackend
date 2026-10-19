@@ -91,7 +91,7 @@ mod tests {
     fn the_schema_module_carries_its_migrations() {
         let schema = find("schema").expect("schema should be registered");
 
-        assert_eq!(up_versions(&schema).len(), 2);
+        assert_eq!(up_versions(&schema).len(), 3);
         assert!(schema.migrator.iter().all(|m| !m.sql.is_empty()));
     }
 
