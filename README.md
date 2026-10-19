@@ -162,7 +162,7 @@ written twice. `src/rpc.rs` is where the generated module is included.
 | Service         | Methods                                                     |
 | --------------- | ----------------------------------------------------------- |
 | `HealthService` | `Check`                                                      |
-| `AuthService`   | `Login`, `RefreshToken`                                      |
+| `AuthService`   | `Login`, `Register`, `RefreshToken`, `GoogleLoginUrl`, `LoginWithGoogle`, `GetCurrentUser` |
 | `SchemaService` | `CreateSchema`, `GetSchema`, `ListSchemas`, `UpdateSchema`, `DeleteSchema`, `ValidateSchema`, `GenerateDdl` |
 
 The two transports share everything below the adapter. `SchemaService` in
