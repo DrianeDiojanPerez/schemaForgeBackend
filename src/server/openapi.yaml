@@ -572,8 +572,9 @@ paths:
                   type: boolean
                   default: true
                   description: |
-                    Append the canvas layout as SQL comments the database
-                    ignores, so the script reads back as the same diagram.
+                    Write each table's canvas position as a comment above its
+                    CREATE TABLE, which the database ignores, so the script
+                    reads back as the same diagram.
       responses:
         "200":
           description: The statements, and anything worth knowing about them.

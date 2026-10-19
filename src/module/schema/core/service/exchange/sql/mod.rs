@@ -25,12 +25,16 @@ pub(super) fn read(content: &str, include_positions: bool) -> Result<(SchemaDraf
     let (statements, hints) = scan(content);
     let mut report = Report::default();
     let mut tables = Vec::new();
+    let mut table_at = Vec::new();
     let mut comments = Vec::new();
     let mut late_keys = Vec::new();
 
-    for statement in &statements {
+    for (at, statement) in statements.iter().enumerate() {
         match classify(statement) {
-            Read::Table(parsed) => tables.push(parsed),
+            Read::Table(parsed) => {
+                table_at.push(at);
+                tables.push(parsed);
+            }
             Read::ForeignKey(parsed) => late_keys.push(parsed),
             Read::Comment(comment) => comments.push(comment),
             Read::Skipped => report.push(skipped(&statement.source)),
@@ -81,7 +85,7 @@ pub(super) fn read(content: &str, include_positions: bool) -> Result<(SchemaDraf
         describe(&mut draft, comment, &mut report);
     }
 
-    place(&mut draft, &hints, include_positions);
+    place(&mut draft, &hints, &table_at, include_positions);
 
     Ok((draft, report))
 }
@@ -324,15 +328,28 @@ fn describe(draft: &mut SchemaDraft, comment: Comment, report: &mut Report) {
     }
 }
 
-fn place(draft: &mut SchemaDraft, hints: &[LayoutHint], include_positions: bool) {
+/// A line written directly above the table beats one from the block older
+/// files wrote at the foot of the script, so a file carrying both opens the
+/// way its author last arranged it.
+fn place(
+    draft: &mut SchemaDraft,
+    hints: &[LayoutHint],
+    table_at: &[usize],
+    include_positions: bool,
+) {
     for (index, entity) in draft.entities.iter_mut().enumerate() {
-        let hint = include_positions.then(|| {
-            hints
-                .iter()
-                .find(|hint| same_table(&hint.table, &entity.name))
-        });
+        let hint = include_positions
+            .then(|| {
+                let named = |hint: &&LayoutHint| same_table(&hint.table, &entity.name);
 
-        entity.position = match hint.flatten() {
+                hints
+                    .iter()
+                    .find(|hint| hint.above == table_at.get(index).copied() && named(hint))
+                    .or_else(|| hints.iter().find(named))
+            })
+            .flatten();
+
+        entity.position = match hint {
             Some(hint) => crate::module::schema::core::domain::Position::new(hint.x, hint.y),
             None => grid_slot(index),
         };

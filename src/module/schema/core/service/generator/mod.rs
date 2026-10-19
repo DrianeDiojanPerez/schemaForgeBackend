@@ -17,7 +17,20 @@ impl Generator for PostgresGenerator {
     }
 
     fn generate(&self, schema: &Schema, options: GenerateOptions) -> String {
-        let mut blocks: Vec<String> = schema.entities.iter().map(table::create_table).collect();
+        let mut blocks: Vec<String> = schema
+            .entities
+            .iter()
+            .map(|entity| {
+                let statement = table::create_table(entity);
+
+                // The position rides directly above the table it belongs to,
+                // so a hand edited script keeps the two together.
+                match options.include_positions {
+                    true => format!("{}\n{statement}", layout::position(entity)),
+                    false => statement,
+                }
+            })
+            .collect();
 
         blocks.extend(constraint::foreign_keys(schema));
 
@@ -27,12 +40,6 @@ impl Generator for PostgresGenerator {
             if !documentation.is_empty() {
                 blocks.push(documentation.join("\n"));
             }
-        }
-
-        // A script with nothing in it stays empty, so a caller cannot mistake
-        // a layout block on its own for a schema.
-        if options.include_positions && !blocks.is_empty() {
-            blocks.push(layout::layout(schema));
         }
 
         blocks.join("\n\n")

@@ -498,7 +498,7 @@ fn the_reference_comes_back_pointing_at_the_same_column() {
 }
 
 #[test]
-fn the_layout_block_puts_the_tables_back_where_they_were() {
+fn the_line_above_each_table_puts_it_back_where_it_was() {
     let script = PostgresGenerator.generate(&course_registration(), GenerateOptions::default());
     let (draft, _) = from_sql(&script);
 
@@ -506,8 +506,39 @@ fn the_layout_block_puts_the_tables_back_where_they_were() {
     assert_eq!(draft.entities[1].position, Position::new(400.0, 80.0));
 }
 
+/// Scripts saved before the positions moved above their tables still open
+/// with the diagram they were saved with.
 #[test]
-fn the_layout_block_can_be_ignored_in_favour_of_a_fresh_grid() {
+fn a_layout_block_at_the_foot_of_an_older_script_still_counts() {
+    let (draft, _) = from_sql(
+        "CREATE TABLE \"users\" (\"id\" UUID NOT NULL, PRIMARY KEY (\"id\"));
+
+         CREATE TABLE \"orders\" (\"id\" UUID NOT NULL, PRIMARY KEY (\"id\"));
+
+         -- @schemaforge layout 1
+         -- @table \"users\" 120 340
+         -- @table \"orders\" 560 340",
+    );
+
+    assert_eq!(draft.entities[0].position, Position::new(120.0, 340.0));
+    assert_eq!(draft.entities[1].position, Position::new(560.0, 340.0));
+}
+
+#[test]
+fn the_line_above_the_table_beats_the_block_at_the_foot() {
+    let (draft, _) = from_sql(
+        "-- @table \"users\" 120 340
+         CREATE TABLE \"users\" (\"id\" UUID NOT NULL, PRIMARY KEY (\"id\"));
+
+         -- @schemaforge layout 1
+         -- @table \"users\" 999 999",
+    );
+
+    assert_eq!(draft.entities[0].position, Position::new(120.0, 340.0));
+}
+
+#[test]
+fn the_layout_can_be_ignored_in_favour_of_a_fresh_grid() {
     let script = PostgresGenerator.generate(&course_registration(), GenerateOptions::default());
     let (draft, _) = import(&script, ExchangeFormat::Sql, false).expect("the script should load");
 

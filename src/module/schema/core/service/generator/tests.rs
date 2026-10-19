@@ -381,20 +381,21 @@ fn the_comments_come_after_the_tables_they_describe() {
 }
 
 #[test]
-fn the_canvas_layout_rides_along_as_comments() {
+fn a_position_rides_directly_above_the_table_it_belongs_to() {
     let sql = positioned_ddl(vec![
         table("users", vec![key("id")]).with_position(Position::new(120.0, 340.0)),
         table("orders", vec![key("id")]).with_position(Position::new(560.0, 340.0)),
     ]);
 
     assert!(
-        sql.ends_with(concat!(
-            "-- @schemaforge layout 1\n",
-            "-- @table \"users\" 120 340\n",
-            "-- @table \"orders\" 560 340"
-        )),
+        sql.contains("-- @table \"users\" 120 340\nCREATE TABLE \"users\""),
         "got:\n{sql}"
     );
+    assert!(
+        sql.contains("-- @table \"orders\" 560 340\nCREATE TABLE \"orders\""),
+        "got:\n{sql}"
+    );
+    assert!(!sql.contains("@schemaforge"), "got:\n{sql}");
 }
 
 #[test]
@@ -407,24 +408,21 @@ fn a_position_lands_on_whole_numbers() {
 }
 
 #[test]
-fn the_layout_block_is_the_only_thing_positions_add() {
+fn a_line_above_each_table_is_the_only_thing_positions_add() {
     let entities = vec![table("users", vec![key("id")]).with_position(Position::new(10.0, 20.0))];
     let plain = ddl(entities.clone());
     let positioned = positioned_ddl(entities);
 
-    assert_eq!(
-        positioned,
-        format!("{plain}\n\n-- @schemaforge layout 1\n-- @table \"users\" 10 20")
-    );
+    assert_eq!(positioned, format!("-- @table \"users\" 10 20\n{plain}"));
 }
 
 #[test]
-fn an_empty_script_stays_empty_rather_than_becoming_a_layout_block() {
+fn an_empty_script_stays_empty_rather_than_becoming_a_pile_of_comments() {
     assert_eq!(positioned_ddl(Vec::new()), "");
 }
 
 #[test]
-fn the_layout_comes_after_the_descriptions() {
+fn the_descriptions_keep_their_place_at_the_foot_of_the_script() {
     let sql = PostgresGenerator.generate(
         &schema(vec![
             table("users", vec![key("id")]).with_description("Accounts")
@@ -432,10 +430,9 @@ fn the_layout_comes_after_the_descriptions() {
         options(true, true),
     );
 
+    let position = sql.find("-- @table").expect("the position is emitted");
+    let create = sql.find("CREATE TABLE").expect("the table is created");
     let comment = sql.find("COMMENT ON").expect("the comment is emitted");
-    let layout = sql
-        .find("@schemaforge layout")
-        .expect("the layout is emitted");
 
-    assert!(comment < layout, "got:\n{sql}");
+    assert!(position < create && create < comment, "got:\n{sql}");
 }

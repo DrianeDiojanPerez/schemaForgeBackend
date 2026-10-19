@@ -40,6 +40,10 @@ pub(super) struct LayoutHint {
     pub(super) table: String,
     pub(super) x: f64,
     pub(super) y: f64,
+    /// The statement the line sits directly above, when it sits above one at
+    /// all. The old files wrote every position in a block at the foot of the
+    /// script, where it belongs to no statement in particular.
+    pub(super) above: Option<usize>,
 }
 
 pub(super) fn scan(sql: &str) -> (Vec<Statement>, Vec<LayoutHint>) {
@@ -145,7 +149,11 @@ impl Scanner {
             self.at += 1;
         }
 
-        if let Some(hint) = layout_hint(&self.slice(start, self.at)) {
+        if let Some(mut hint) = layout_hint(&self.slice(start, self.at)) {
+            if self.tokens.is_empty() {
+                hint.above = Some(self.statements.len());
+            }
+
             self.hints.push(hint);
         }
     }
@@ -271,8 +279,8 @@ fn is_name_char(character: char) -> bool {
     character.is_alphanumeric() || character == '_' || character == '$'
 }
 
-/// `-- @table "users" 120 340`, the block the generator writes. Anything else
-/// on a comment line is just a comment.
+/// `-- @table "users" 120 340`, the line the generator writes above each
+/// table. Anything else on a comment line is just a comment.
 fn layout_hint(line: &str) -> Option<LayoutHint> {
     let rest = line.trim_start_matches('-').trim().strip_prefix("@table")?;
     let rest = rest.trim();
@@ -292,7 +300,12 @@ fn layout_hint(line: &str) -> Option<LayoutHint> {
     let x = numbers.next()?.parse().ok()?;
     let y = numbers.next()?.parse().ok()?;
 
-    Some(LayoutHint { table, x, y })
+    Some(LayoutHint {
+        table,
+        x,
+        y,
+        above: None,
+    })
 }
 
 fn split_quoted(input: &str) -> Option<(String, &str)> {
