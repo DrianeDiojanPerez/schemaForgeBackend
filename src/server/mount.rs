@@ -13,5 +13,5 @@ pub fn mount(modules: &Modules) -> Router {
             modules.auth.clone(),
             modules.rbac.clone(),
         ))
-        .merge(schema::routes(&modules.schema))
+        .merge(schema::routes(&modules.schema, modules.auth.clone()))
 }

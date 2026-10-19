@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use uuid::Uuid;
 
 use crate::module::schema::core::domain::{
     Dialect, DomainError, ExchangeFormat, Report, Schema, SchemaDraft, SchemaSummary,
@@ -6,14 +7,26 @@ use crate::module::schema::core::domain::{
 use crate::package::errdef::Error;
 use crate::package::pagination::{Data, ListRequest};
 
+/// Every schema belongs to one user, and the store only ever answers about
+/// that user's own. A schema someone else owns reads as missing rather than
+/// as forbidden, so a caller cannot tell it exists.
 #[async_trait]
 pub trait SchemaRepository: Send + Sync {
-    async fn index(&self, request: &ListRequest) -> Result<(Vec<SchemaSummary>, i64), DomainError>;
-    async fn create(&self, draft: SchemaDraft) -> Result<Schema, DomainError>;
-    async fn find_by_id(&self, id: &str) -> Result<Option<Schema>, DomainError>;
-    async fn find_by_name(&self, name: &str) -> Result<Option<Schema>, DomainError>;
-    async fn replace(&self, id: &str, draft: SchemaDraft) -> Result<Schema, DomainError>;
-    async fn delete(&self, id: &str) -> Result<(), DomainError>;
+    async fn index(
+        &self,
+        owner: Uuid,
+        request: &ListRequest,
+    ) -> Result<(Vec<SchemaSummary>, i64), DomainError>;
+    async fn create(&self, owner: Uuid, draft: SchemaDraft) -> Result<Schema, DomainError>;
+    async fn find_by_id(&self, owner: Uuid, id: &str) -> Result<Option<Schema>, DomainError>;
+    async fn find_by_name(&self, owner: Uuid, name: &str) -> Result<Option<Schema>, DomainError>;
+    async fn replace(
+        &self,
+        owner: Uuid,
+        id: &str,
+        draft: SchemaDraft,
+    ) -> Result<Schema, DomainError>;
+    async fn delete(&self, owner: Uuid, id: &str) -> Result<(), DomainError>;
 }
 
 pub trait Verifier: Send + Sync {
@@ -45,21 +58,26 @@ impl Default for GenerateOptions {
 
 #[async_trait]
 pub trait SchemaService: Send + Sync {
-    async fn index(&self, request: ListRequest) -> Result<Data<SchemaSummary>, Error>;
-    async fn create(&self, draft: SchemaDraft) -> Result<Schema, Error>;
-    async fn find_by_id(&self, id: &str) -> Result<Schema, Error>;
-    async fn replace(&self, id: &str, draft: SchemaDraft) -> Result<Schema, Error>;
-    async fn delete(&self, id: &str) -> Result<(), Error>;
+    async fn index(&self, caller: Uuid, request: ListRequest)
+        -> Result<Data<SchemaSummary>, Error>;
+    async fn create(&self, caller: Uuid, draft: SchemaDraft) -> Result<Schema, Error>;
+    async fn find_by_id(&self, caller: Uuid, id: &str) -> Result<Schema, Error>;
+    async fn replace(&self, caller: Uuid, id: &str, draft: SchemaDraft) -> Result<Schema, Error>;
+    async fn delete(&self, caller: Uuid, id: &str) -> Result<(), Error>;
 
     /// Validates a stored schema, or an unsaved draft the canvas is holding.
-    async fn validate(&self, target: ValidationTarget) -> Result<Report, Error>;
+    async fn validate(&self, caller: Uuid, target: ValidationTarget) -> Result<Report, Error>;
 
     /// Verifies before it emits. An invalid schema comes back as diagnostics
     /// with an empty script rather than as a failure.
-    async fn generate_ddl(&self, request: GenerateRequest) -> Result<Generated, Error>;
+    async fn generate_ddl(
+        &self,
+        caller: Uuid,
+        request: GenerateRequest,
+    ) -> Result<Generated, Error>;
 
     /// Writes a schema out as a file the canvas can hand to the browser.
-    async fn export(&self, request: ExportRequest) -> Result<Exported, Error>;
+    async fn export(&self, caller: Uuid, request: ExportRequest) -> Result<Exported, Error>;
 
     /// Reads a file back into a draft. Nothing is stored: the canvas saves
     /// what comes back through the rpcs it already uses.

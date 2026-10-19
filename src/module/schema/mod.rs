@@ -4,14 +4,18 @@ mod service;
 
 pub use service::Services;
 
+use std::sync::Arc;
+
 use axum::routing::{delete, get, post, put};
-use axum::Router;
+use axum::{middleware, Router};
 
 use crate::module::schema::adapter::handler::schema;
 use crate::module::schema::adapter::rpc::SchemaHandler;
+use crate::package::auth::Auth;
 use crate::rpc::v1::schema_service_server::SchemaServiceServer;
+use crate::server::middlewares::authentication::authenticate;
 
-pub fn routes(services: &Services) -> Router {
+pub fn routes(services: &Services, auth: Arc<dyn Auth>) -> Router {
     Router::new()
         .route("/v1/schemas", get(schema::index))
         .route("/v1/schemas", post(schema::create))
@@ -22,6 +26,7 @@ pub fn routes(services: &Services) -> Router {
         .route("/v1/schemas/{schema-id}", get(schema::get))
         .route("/v1/schemas/{schema-id}", put(schema::replace))
         .route("/v1/schemas/{schema-id}", delete(schema::delete))
+        .route_layer(middleware::from_fn_with_state(auth, authenticate))
         .with_state(services.schema.clone())
 }
 

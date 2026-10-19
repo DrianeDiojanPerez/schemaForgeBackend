@@ -1,11 +1,13 @@
 use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
+use uuid::Uuid;
 
 use crate::module::schema::adapter::rpc::mapper;
 use crate::module::schema::core::ports::{
     ExportRequest, GenerateOptions, GenerateRequest, ImportRequest, SchemaService, ValidationTarget,
 };
+use crate::package::auth::AuthUser;
 use crate::package::errdef::Error;
 use crate::package::pagination::ListRequest;
 use crate::rpc::v1;
@@ -17,6 +19,16 @@ pub struct SchemaHandler {
 impl SchemaHandler {
     pub fn new(service: Arc<dyn SchemaService>) -> Self {
         Self { service }
+    }
+
+    /// The guard put the caller here after it read the token, so a request
+    /// without one never got past it.
+    fn caller<T>(request: &Request<T>) -> Result<Uuid, Status> {
+        request
+            .extensions()
+            .get::<AuthUser>()
+            .map(AuthUser::id)
+            .ok_or_else(|| Status::from(Error::unauthorized("malformed or missing jwt token")))
     }
 
     /// Three messages carry the same choice between a stored id and a drawn
@@ -77,6 +89,7 @@ impl v1::schema_service_server::SchemaService for SchemaHandler {
         &self,
         request: Request<v1::CreateSchemaRequest>,
     ) -> Result<Response<v1::CreateSchemaResponse>, Status> {
+        let caller = Self::caller(&request)?;
         let request = request.into_inner();
 
         let draft = mapper::draft_from(
@@ -86,7 +99,7 @@ impl v1::schema_service_server::SchemaService for SchemaHandler {
             request.relationships,
         )?;
 
-        let schema = self.service.create(draft).await?;
+        let schema = self.service.create(caller, draft).await?;
 
         Ok(Response::new(v1::CreateSchemaResponse {
             schema: Some(mapper::schema_to(schema)),
@@ -98,7 +111,11 @@ impl v1::schema_service_server::SchemaService for SchemaHandler {
         &self,
         request: Request<v1::GetSchemaRequest>,
     ) -> Result<Response<v1::GetSchemaResponse>, Status> {
-        let schema = self.service.find_by_id(&request.into_inner().id).await?;
+        let caller = Self::caller(&request)?;
+        let schema = self
+            .service
+            .find_by_id(caller, &request.into_inner().id)
+            .await?;
 
         Ok(Response::new(v1::GetSchemaResponse {
             schema: Some(mapper::schema_to(schema)),
@@ -110,14 +127,15 @@ impl v1::schema_service_server::SchemaService for SchemaHandler {
         &self,
         request: Request<v1::ListSchemasRequest>,
     ) -> Result<Response<v1::ListSchemasResponse>, Status> {
+        let caller = Self::caller(&request)?;
         let request = request.into_inner();
 
         let page = self
             .service
-            .index(ListRequest::paged(
-                request.page.into(),
-                request.per_page.into(),
-            ))
+            .index(
+                caller,
+                ListRequest::paged(request.page.into(), request.per_page.into()),
+            )
             .await?;
 
         Ok(Response::new(v1::ListSchemasResponse {
@@ -133,6 +151,7 @@ impl v1::schema_service_server::SchemaService for SchemaHandler {
         &self,
         request: Request<v1::UpdateSchemaRequest>,
     ) -> Result<Response<v1::UpdateSchemaResponse>, Status> {
+        let caller = Self::caller(&request)?;
         let request = request.into_inner();
 
         let draft = mapper::draft_from(
@@ -142,7 +161,7 @@ impl v1::schema_service_server::SchemaService for SchemaHandler {
             request.relationships,
         )?;
 
-        let schema = self.service.replace(&request.id, draft).await?;
+        let schema = self.service.replace(caller, &request.id, draft).await?;
 
         Ok(Response::new(v1::UpdateSchemaResponse {
             schema: Some(mapper::schema_to(schema)),
@@ -154,7 +173,10 @@ impl v1::schema_service_server::SchemaService for SchemaHandler {
         &self,
         request: Request<v1::DeleteSchemaRequest>,
     ) -> Result<Response<v1::DeleteSchemaResponse>, Status> {
-        self.service.delete(&request.into_inner().id).await?;
+        let caller = Self::caller(&request)?;
+        self.service
+            .delete(caller, &request.into_inner().id)
+            .await?;
 
         Ok(Response::new(v1::DeleteSchemaResponse {}))
     }
@@ -164,8 +186,9 @@ impl v1::schema_service_server::SchemaService for SchemaHandler {
         &self,
         request: Request<v1::ValidateSchemaRequest>,
     ) -> Result<Response<v1::ValidateSchemaResponse>, Status> {
+        let caller = Self::caller(&request)?;
         let target = Self::target_from(request.into_inner().target)?;
-        let report = self.service.validate(target).await?;
+        let report = self.service.validate(caller, target).await?;
 
         Ok(Response::new(v1::ValidateSchemaResponse {
             valid: report.is_valid(),
@@ -178,18 +201,22 @@ impl v1::schema_service_server::SchemaService for SchemaHandler {
         &self,
         request: Request<v1::GenerateDdlRequest>,
     ) -> Result<Response<v1::GenerateDdlResponse>, Status> {
+        let caller = Self::caller(&request)?;
         let request = request.into_inner();
 
         let generated = self
             .service
-            .generate_ddl(GenerateRequest {
-                target: Self::generate_target_from(request.target)?,
-                dialect: mapper::dialect_from(request.dialect),
-                options: GenerateOptions {
-                    include_comments: request.include_comments,
-                    include_positions: request.include_positions.unwrap_or(true),
+            .generate_ddl(
+                caller,
+                GenerateRequest {
+                    target: Self::generate_target_from(request.target)?,
+                    dialect: mapper::dialect_from(request.dialect),
+                    options: GenerateOptions {
+                        include_comments: request.include_comments,
+                        include_positions: request.include_positions.unwrap_or(true),
+                    },
                 },
-            })
+            )
             .await?;
 
         Ok(Response::new(v1::GenerateDdlResponse {
@@ -203,15 +230,19 @@ impl v1::schema_service_server::SchemaService for SchemaHandler {
         &self,
         request: Request<v1::ExportSchemaRequest>,
     ) -> Result<Response<v1::ExportSchemaResponse>, Status> {
+        let caller = Self::caller(&request)?;
         let request = request.into_inner();
 
         let exported = self
             .service
-            .export(ExportRequest {
-                target: Self::export_target_from(request.target)?,
-                format: mapper::exchange_format_from(request.format),
-                include_positions: request.include_positions.unwrap_or(true),
-            })
+            .export(
+                caller,
+                ExportRequest {
+                    target: Self::export_target_from(request.target)?,
+                    format: mapper::exchange_format_from(request.format),
+                    include_positions: request.include_positions.unwrap_or(true),
+                },
+            )
             .await?;
 
         Ok(Response::new(v1::ExportSchemaResponse {
@@ -248,29 +279,39 @@ impl v1::schema_service_server::SchemaService for SchemaHandler {
 mod tests {
     use super::*;
 
+    use std::sync::Mutex;
+
     use async_trait::async_trait;
     use tonic::Code;
 
     use crate::module::schema::core::domain::{Report, Schema, SchemaDraft, SchemaSummary};
     use crate::module::schema::core::ports::{Exported, Generated, Imported};
+    use crate::package::auth::Identity;
     use crate::package::pagination::{Data, DEFAULT_PER_PAGE};
     use v1::schema_service_server::SchemaService as _;
 
-    /// Records what the handler passed down, so a test can assert the adapter
-    /// translated rather than that the core behaved.
+    /// Records who the handler said was calling, so a test can assert the
+    /// adapter handed the caller down rather than that the core behaved.
     #[derive(Default)]
     struct SpyService {
         fail_with: Option<fn() -> Error>,
+        callers: Mutex<Vec<Uuid>>,
     }
 
     impl SpyService {
         fn failing(failure: fn() -> Error) -> Self {
             Self {
                 fail_with: Some(failure),
+                callers: Mutex::default(),
             }
         }
 
-        fn guard(&self) -> Result<(), Error> {
+        fn guard(&self, caller: Uuid) -> Result<(), Error> {
+            self.callers
+                .lock()
+                .expect("the lock should be held")
+                .push(caller);
+
             match self.fail_with {
                 Some(failure) => Err(failure()),
                 None => Ok(()),
@@ -291,8 +332,12 @@ mod tests {
 
     #[async_trait]
     impl SchemaService for SpyService {
-        async fn index(&self, request: ListRequest) -> Result<Data<SchemaSummary>, Error> {
-            self.guard()?;
+        async fn index(
+            &self,
+            caller: Uuid,
+            request: ListRequest,
+        ) -> Result<Data<SchemaSummary>, Error> {
+            self.guard(caller)?;
 
             Ok(Data::new(
                 vec![self.schema().summary()],
@@ -302,36 +347,45 @@ mod tests {
             ))
         }
 
-        async fn create(&self, draft: SchemaDraft) -> Result<Schema, Error> {
-            self.guard()?;
+        async fn create(&self, caller: Uuid, draft: SchemaDraft) -> Result<Schema, Error> {
+            self.guard(caller)?;
 
             Ok(Schema::new("s1", draft, chrono::Utc::now()))
         }
 
-        async fn find_by_id(&self, _id: &str) -> Result<Schema, Error> {
-            self.guard()?;
+        async fn find_by_id(&self, caller: Uuid, _id: &str) -> Result<Schema, Error> {
+            self.guard(caller)?;
 
             Ok(self.schema())
         }
 
-        async fn replace(&self, id: &str, draft: SchemaDraft) -> Result<Schema, Error> {
-            self.guard()?;
+        async fn replace(
+            &self,
+            caller: Uuid,
+            id: &str,
+            draft: SchemaDraft,
+        ) -> Result<Schema, Error> {
+            self.guard(caller)?;
 
             Ok(Schema::new(id, draft, chrono::Utc::now()))
         }
 
-        async fn delete(&self, _id: &str) -> Result<(), Error> {
-            self.guard()
+        async fn delete(&self, caller: Uuid, _id: &str) -> Result<(), Error> {
+            self.guard(caller)
         }
 
-        async fn validate(&self, _target: ValidationTarget) -> Result<Report, Error> {
-            self.guard()?;
+        async fn validate(&self, caller: Uuid, _target: ValidationTarget) -> Result<Report, Error> {
+            self.guard(caller)?;
 
             Ok(Report::default())
         }
 
-        async fn generate_ddl(&self, _request: GenerateRequest) -> Result<Generated, Error> {
-            self.guard()?;
+        async fn generate_ddl(
+            &self,
+            caller: Uuid,
+            _request: GenerateRequest,
+        ) -> Result<Generated, Error> {
+            self.guard(caller)?;
 
             Ok(Generated {
                 ddl: "CREATE TABLE users ();".to_owned(),
@@ -339,8 +393,8 @@ mod tests {
             })
         }
 
-        async fn export(&self, _request: ExportRequest) -> Result<Exported, Error> {
-            self.guard()?;
+        async fn export(&self, caller: Uuid, _request: ExportRequest) -> Result<Exported, Error> {
+            self.guard(caller)?;
 
             Ok(Exported {
                 file_name: "blog.json".to_owned(),
@@ -350,7 +404,9 @@ mod tests {
         }
 
         async fn import(&self, _request: ImportRequest) -> Result<Imported, Error> {
-            self.guard()?;
+            if let Some(failure) = self.fail_with {
+                return Err(failure());
+            }
 
             Ok(Imported {
                 draft: self.schema(),
@@ -363,12 +419,32 @@ mod tests {
         SchemaHandler::new(Arc::new(service))
     }
 
+    fn caller() -> AuthUser {
+        AuthUser(Identity {
+            id: Uuid::from_u128(1),
+            email: "ada@example.com".to_owned(),
+            user_name: "ada".to_owned(),
+            first_name: "Ada".to_owned(),
+            last_name: "Lovelace".to_owned(),
+            avatar_url: None,
+            password: String::new(),
+            roles: Vec::new(),
+        })
+    }
+
+    /// What the guard leaves on a request it let through.
+    fn signed<T>(message: T) -> Request<T> {
+        let mut request = Request::new(message);
+        request.extensions_mut().insert(caller());
+        request
+    }
+
     #[tokio::test]
     async fn a_create_returns_the_stored_schema() {
         let handler = handler(SpyService::default());
 
         let response = handler
-            .create_schema(Request::new(v1::CreateSchemaRequest {
+            .create_schema(signed(v1::CreateSchemaRequest {
                 name: "blog".to_owned(),
                 description: String::new(),
                 entities: vec![],
@@ -391,7 +467,7 @@ mod tests {
         }));
 
         let status = handler
-            .create_schema(Request::new(v1::CreateSchemaRequest {
+            .create_schema(signed(v1::CreateSchemaRequest {
                 name: "blog".to_owned(),
                 description: String::new(),
                 entities: vec![v1::Entity {
@@ -414,7 +490,7 @@ mod tests {
         let handler = handler(SpyService::default());
 
         let response = handler
-            .list_schemas(Request::new(v1::ListSchemasRequest {
+            .list_schemas(signed(v1::ListSchemasRequest {
                 page: 1,
                 per_page: 10,
             }))
@@ -433,7 +509,7 @@ mod tests {
         let handler = handler(SpyService::default());
 
         let response = handler
-            .list_schemas(Request::new(v1::ListSchemasRequest {
+            .list_schemas(signed(v1::ListSchemasRequest {
                 page: 0,
                 per_page: 0,
             }))
@@ -454,7 +530,7 @@ mod tests {
         let handler = handler(SpyService::failing(|| Error::not_found("nope")));
 
         let status = handler
-            .get_schema(Request::new(v1::GetSchemaRequest {
+            .get_schema(signed(v1::GetSchemaRequest {
                 id: "missing".to_owned(),
             }))
             .await
@@ -470,7 +546,7 @@ mod tests {
         }));
 
         let status = handler
-            .validate_schema(Request::new(v1::ValidateSchemaRequest { target: None }))
+            .validate_schema(signed(v1::ValidateSchemaRequest { target: None }))
             .await
             .expect_err("the call should fail");
 
@@ -484,7 +560,7 @@ mod tests {
         }));
 
         let status = handler
-            .generate_ddl(Request::new(v1::GenerateDdlRequest {
+            .generate_ddl(signed(v1::GenerateDdlRequest {
                 target: Some(v1::generate_ddl_request::Target::Id("s1".to_owned())),
                 dialect: v1::Dialect::Postgres as i32,
                 include_comments: true,
@@ -505,10 +581,96 @@ mod tests {
         let handler = handler(SpyService::default());
 
         handler
-            .delete_schema(Request::new(v1::DeleteSchemaRequest {
+            .delete_schema(signed(v1::DeleteSchemaRequest {
                 id: "s1".to_owned(),
             }))
             .await
             .expect("the call should succeed");
+    }
+
+    #[tokio::test]
+    async fn every_rpc_hands_the_caller_to_the_service() {
+        let spy = Arc::new(SpyService::default());
+        let handler = SchemaHandler::new(spy.clone());
+        let stored = "s1".to_owned();
+
+        handler
+            .get_schema(signed(v1::GetSchemaRequest { id: stored.clone() }))
+            .await
+            .expect("get should succeed");
+        handler
+            .list_schemas(signed(v1::ListSchemasRequest {
+                page: 1,
+                per_page: 10,
+            }))
+            .await
+            .expect("list should succeed");
+        handler
+            .create_schema(signed(v1::CreateSchemaRequest {
+                name: "blog".to_owned(),
+                description: String::new(),
+                entities: vec![],
+                relationships: vec![],
+            }))
+            .await
+            .expect("create should succeed");
+        handler
+            .update_schema(signed(v1::UpdateSchemaRequest {
+                id: stored.clone(),
+                name: "blog".to_owned(),
+                description: String::new(),
+                entities: vec![],
+                relationships: vec![],
+            }))
+            .await
+            .expect("update should succeed");
+        handler
+            .delete_schema(signed(v1::DeleteSchemaRequest { id: stored.clone() }))
+            .await
+            .expect("delete should succeed");
+        handler
+            .validate_schema(signed(v1::ValidateSchemaRequest {
+                target: Some(v1::validate_schema_request::Target::Id(stored.clone())),
+            }))
+            .await
+            .expect("validate should succeed");
+        handler
+            .generate_ddl(signed(v1::GenerateDdlRequest {
+                target: Some(v1::generate_ddl_request::Target::Id(stored.clone())),
+                dialect: v1::Dialect::Postgres as i32,
+                include_comments: false,
+                include_positions: None,
+            }))
+            .await
+            .expect("generate should succeed");
+        handler
+            .export_schema(signed(v1::ExportSchemaRequest {
+                target: Some(v1::export_schema_request::Target::Id(stored)),
+                format: v1::ExportFormat::Json as i32,
+                include_positions: None,
+            }))
+            .await
+            .expect("export should succeed");
+
+        let callers = spy.callers.lock().expect("the lock should be held");
+
+        assert_eq!(callers.len(), 8);
+        assert!(callers.iter().all(|seen| *seen == caller().id()));
+    }
+
+    #[tokio::test]
+    async fn a_request_without_a_caller_is_turned_away_before_the_service() {
+        let handler = handler(SpyService::failing(|| {
+            Error::unknown("the service should never be reached")
+        }));
+
+        let status = handler
+            .get_schema(Request::new(v1::GetSchemaRequest {
+                id: "s1".to_owned(),
+            }))
+            .await
+            .expect_err("the call should fail");
+
+        assert_eq!(status.code(), Code::Unauthenticated);
     }
 }

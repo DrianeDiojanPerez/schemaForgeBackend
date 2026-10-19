@@ -16,10 +16,10 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgRow;
 use sqlx::types::Json;
-use sqlx::Row;
+use sqlx::{PgConnection, Row};
 use uuid::Uuid;
 
-use crate::database::{pg_error, Database};
+use crate::database::Database;
 use crate::module::schema::core::domain::{
     Attribute, Cardinality, DataType, DataTypeKind, DomainError, Entity, ForeignKeyRef, Position,
     Relationship, Schema, SchemaDraft, SchemaSummary,
@@ -27,15 +27,20 @@ use crate::module::schema::core::domain::{
 use crate::module::schema::core::ports::SchemaRepository;
 use crate::package::pagination::ListRequest;
 
-const SELECT_SCHEMA: &str = "SELECT id, name, description, entities, relationships, \
-     created_at, updated_at \
-     FROM schemaforge.schemas";
+const SELECT_SCHEMA: &str = "SELECT s.id, s.name, s.description, s.entities, s.relationships, \
+     s.created_at, s.updated_at \
+     FROM schemaforge.schemas s \
+     INNER JOIN schemaforge.user_schemas us ON us.schema_id = s.id";
 
-const SELECT_SUMMARY: &str = "SELECT id, name, description, \
-     jsonb_array_length(entities) AS entity_count, \
-     jsonb_array_length(relationships) AS relationship_count, \
-     created_at, updated_at \
-     FROM schemaforge.schemas";
+const SELECT_SUMMARY: &str = "SELECT s.id, s.name, s.description, \
+     jsonb_array_length(s.entities) AS entity_count, \
+     jsonb_array_length(s.relationships) AS relationship_count, \
+     s.created_at, s.updated_at \
+     FROM schemaforge.schemas s \
+     INNER JOIN schemaforge.user_schemas us ON us.schema_id = s.id";
+
+const RETURNING_SCHEMA: &str =
+    "RETURNING s.id, s.name, s.description, s.entities, s.relationships, s.created_at, s.updated_at";
 
 #[derive(Debug, Serialize, Deserialize)]
 struct StoredPosition {
@@ -267,15 +272,41 @@ impl PgSchemaRepository {
         DomainError::Storage(err.to_string())
     }
 
-    /// The unique index on the lowercased name is what enforces the rule, so
-    /// two callers racing on the same name still get one schema and one
-    /// conflict instead of both succeeding.
-    fn conflict_or_storage(err: sqlx::Error, name: &str) -> DomainError {
-        if pg_error::is(&err, pg_error::UNIQUE_VIOLATION) {
-            return DomainError::DuplicateSchemaName(name.to_owned());
+    /// A name only has to be unique among one user's schemas, and the owner
+    /// lives in another table, so no index can state the rule. The check runs
+    /// under a lock on the owner and name, so two saves racing on the same
+    /// name still end with one schema and one conflict.
+    async fn reserve_name(
+        conn: &mut PgConnection,
+        owner: Uuid,
+        name: &str,
+        except: Option<Uuid>,
+    ) -> Result<(), DomainError> {
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1 || ':' || LOWER($2)))")
+            .bind(owner.to_string())
+            .bind(name)
+            .execute(&mut *conn)
+            .await
+            .map_err(Self::storage)?;
+
+        let taken: bool = sqlx::query_scalar(
+            "SELECT EXISTS (\
+                 SELECT 1 FROM schemaforge.schemas s \
+                 INNER JOIN schemaforge.user_schemas us ON us.schema_id = s.id \
+                 WHERE us.user_id = $1 AND LOWER(s.name) = LOWER($2) AND s.id IS DISTINCT FROM $3)",
+        )
+        .bind(owner)
+        .bind(name)
+        .bind(except)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(Self::storage)?;
+
+        if taken {
+            return Err(DomainError::DuplicateSchemaName(name.to_owned()));
         }
 
-        Self::storage(err)
+        Ok(())
     }
 
     /// An id that is not a UUID cannot name a stored row, so it reads as
@@ -338,15 +369,23 @@ impl PgSchemaRepository {
 
 #[async_trait]
 impl SchemaRepository for PgSchemaRepository {
-    async fn index(&self, request: &ListRequest) -> Result<(Vec<SchemaSummary>, i64), DomainError> {
-        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM schemaforge.schemas")
-            .fetch_one(self.db.pool())
-            .await
-            .map_err(Self::storage)?;
+    async fn index(
+        &self,
+        owner: Uuid,
+        request: &ListRequest,
+    ) -> Result<(Vec<SchemaSummary>, i64), DomainError> {
+        let total: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM schemaforge.user_schemas WHERE user_id = $1")
+                .bind(owner)
+                .fetch_one(self.db.pool())
+                .await
+                .map_err(Self::storage)?;
 
         let rows = sqlx::query(&format!(
-            "{SELECT_SUMMARY} ORDER BY created_at, id LIMIT $1 OFFSET $2"
+            "{SELECT_SUMMARY} WHERE us.user_id = $1 \
+             ORDER BY us.created_at, us.schema_id LIMIT $2 OFFSET $3"
         ))
+        .bind(owner)
         .bind(request.per_page)
         .bind(request.offset())
         .fetch_all(self.db.pool())
@@ -361,86 +400,131 @@ impl SchemaRepository for PgSchemaRepository {
         Ok((summaries, total))
     }
 
-    async fn create(&self, draft: SchemaDraft) -> Result<Schema, DomainError> {
+    async fn create(&self, owner: Uuid, draft: SchemaDraft) -> Result<Schema, DomainError> {
         let name = draft.name.clone();
         let description = draft.description.clone();
         let (entities, relationships) = Self::drawing(draft);
 
-        let row = sqlx::query(
-            "INSERT INTO schemaforge.schemas (name, description, entities, relationships) \
-             VALUES ($1, $2, $3, $4) \
-             RETURNING id, name, description, entities, relationships, created_at, updated_at",
-        )
+        let mut tx = self.db.pool().begin().await.map_err(Self::storage)?;
+
+        Self::reserve_name(&mut tx, owner, &name, None).await?;
+
+        let row = sqlx::query(&format!(
+            "INSERT INTO schemaforge.schemas AS s (name, description, entities, relationships) \
+             VALUES ($1, $2, $3, $4) {RETURNING_SCHEMA}"
+        ))
         .bind(&name)
         .bind(&description)
         .bind(Json(&entities))
         .bind(Json(&relationships))
-        .fetch_one(self.db.pool())
+        .fetch_one(&mut *tx)
         .await
-        .map_err(|err| Self::conflict_or_storage(err, &name))?;
+        .map_err(Self::storage)?;
 
-        Self::map_schema(&row)
+        let schema = Self::map_schema(&row)?;
+        let id: Uuid = row.try_get("id").map_err(Self::storage)?;
+
+        sqlx::query(
+            "INSERT INTO schemaforge.user_schemas (user_id, schema_id, created_at) \
+             VALUES ($1, $2, $3)",
+        )
+        .bind(owner)
+        .bind(id)
+        .bind(schema.created_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(Self::storage)?;
+
+        tx.commit().await.map_err(Self::storage)?;
+
+        Ok(schema)
     }
 
-    async fn find_by_id(&self, id: &str) -> Result<Option<Schema>, DomainError> {
+    async fn find_by_id(&self, owner: Uuid, id: &str) -> Result<Option<Schema>, DomainError> {
         let Some(uuid) = Self::parse_id(id) else {
             return Ok(None);
         };
 
-        let row = sqlx::query(&format!("{SELECT_SCHEMA} WHERE id = $1"))
-            .bind(uuid)
-            .fetch_optional(self.db.pool())
-            .await
-            .map_err(Self::storage)?;
+        let row = sqlx::query(&format!(
+            "{SELECT_SCHEMA} WHERE us.user_id = $1 AND s.id = $2"
+        ))
+        .bind(owner)
+        .bind(uuid)
+        .fetch_optional(self.db.pool())
+        .await
+        .map_err(Self::storage)?;
 
         row.as_ref().map(Self::map_schema).transpose()
     }
 
-    async fn find_by_name(&self, name: &str) -> Result<Option<Schema>, DomainError> {
-        let row = sqlx::query(&format!("{SELECT_SCHEMA} WHERE LOWER(name) = LOWER($1)"))
-            .bind(name)
-            .fetch_optional(self.db.pool())
-            .await
-            .map_err(Self::storage)?;
+    async fn find_by_name(&self, owner: Uuid, name: &str) -> Result<Option<Schema>, DomainError> {
+        let row = sqlx::query(&format!(
+            "{SELECT_SCHEMA} WHERE us.user_id = $1 AND LOWER(s.name) = LOWER($2)"
+        ))
+        .bind(owner)
+        .bind(name)
+        .fetch_optional(self.db.pool())
+        .await
+        .map_err(Self::storage)?;
 
         row.as_ref().map(Self::map_schema).transpose()
     }
 
-    async fn replace(&self, id: &str, draft: SchemaDraft) -> Result<Schema, DomainError> {
+    async fn replace(
+        &self,
+        owner: Uuid,
+        id: &str,
+        draft: SchemaDraft,
+    ) -> Result<Schema, DomainError> {
         let uuid = Self::parse_id(id).ok_or(DomainError::SchemaNotFound)?;
 
         let name = draft.name.clone();
         let description = draft.description.clone();
         let (entities, relationships) = Self::drawing(draft);
 
-        let row = sqlx::query(
-            "UPDATE schemaforge.schemas \
-             SET name = $2, description = $3, entities = $4, relationships = $5, \
+        let mut tx = self.db.pool().begin().await.map_err(Self::storage)?;
+
+        Self::reserve_name(&mut tx, owner, &name, Some(uuid)).await?;
+
+        let row = sqlx::query(&format!(
+            "UPDATE schemaforge.schemas AS s \
+             SET name = $3, description = $4, entities = $5, relationships = $6, \
                  updated_at = NOW() \
-             WHERE id = $1 \
-             RETURNING id, name, description, entities, relationships, created_at, updated_at",
-        )
+             FROM schemaforge.user_schemas us \
+             WHERE us.schema_id = s.id AND us.user_id = $1 AND s.id = $2 \
+             {RETURNING_SCHEMA}"
+        ))
+        .bind(owner)
         .bind(uuid)
         .bind(&name)
         .bind(&description)
         .bind(Json(&entities))
         .bind(Json(&relationships))
-        .fetch_optional(self.db.pool())
+        .fetch_optional(&mut *tx)
         .await
-        .map_err(|err| Self::conflict_or_storage(err, &name))?
+        .map_err(Self::storage)?
         .ok_or(DomainError::SchemaNotFound)?;
 
-        Self::map_schema(&row)
+        let schema = Self::map_schema(&row)?;
+
+        tx.commit().await.map_err(Self::storage)?;
+
+        Ok(schema)
     }
 
-    async fn delete(&self, id: &str) -> Result<(), DomainError> {
+    async fn delete(&self, owner: Uuid, id: &str) -> Result<(), DomainError> {
         let uuid = Self::parse_id(id).ok_or(DomainError::SchemaNotFound)?;
 
-        let result = sqlx::query("DELETE FROM schemaforge.schemas WHERE id = $1")
-            .bind(uuid)
-            .execute(self.db.pool())
-            .await
-            .map_err(Self::storage)?;
+        let result = sqlx::query(
+            "DELETE FROM schemaforge.schemas s \
+             USING schemaforge.user_schemas us \
+             WHERE us.schema_id = s.id AND us.user_id = $1 AND s.id = $2",
+        )
+        .bind(owner)
+        .bind(uuid)
+        .execute(self.db.pool())
+        .await
+        .map_err(Self::storage)?;
 
         if result.rows_affected() == 0 {
             return Err(DomainError::SchemaNotFound);

@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use uuid::Uuid;
 
 use crate::module::schema::core::domain::{
     Dialect, DomainError, Report, Schema, SchemaDraft, SchemaSummary,
@@ -36,9 +37,9 @@ impl SchemaServiceImpl {
         }
     }
 
-    async fn resolve(&self, target: ValidationTarget) -> Result<Schema, Error> {
+    async fn resolve(&self, caller: Uuid, target: ValidationTarget) -> Result<Schema, Error> {
         match target {
-            ValidationTarget::Stored(id) => self.find_by_id(&id).await,
+            ValidationTarget::Stored(id) => self.find_by_id(caller, &id).await,
             ValidationTarget::Draft(schema) => Ok(*schema),
         }
     }
@@ -95,52 +96,70 @@ fn to_error(failure: DomainError) -> Error {
 #[async_trait]
 impl SchemaService for SchemaServiceImpl {
     #[tracing::instrument(name = "SchemaService.Index", skip_all)]
-    async fn index(&self, request: ListRequest) -> Result<Data<SchemaSummary>, Error> {
-        let (summaries, total) = self.repository.index(&request).await.map_err(to_error)?;
+    async fn index(
+        &self,
+        caller: Uuid,
+        request: ListRequest,
+    ) -> Result<Data<SchemaSummary>, Error> {
+        let (summaries, total) = self
+            .repository
+            .index(caller, &request)
+            .await
+            .map_err(to_error)?;
 
         Ok(Data::new(summaries, total, request.page, request.per_page))
     }
 
     #[tracing::instrument(name = "SchemaService.Create", skip_all, fields(schema.name = %draft.name))]
-    async fn create(&self, draft: SchemaDraft) -> Result<Schema, Error> {
+    async fn create(&self, caller: Uuid, draft: SchemaDraft) -> Result<Schema, Error> {
         Self::check_draft(&draft)?;
 
-        self.repository.create(draft).await.map_err(to_error)
+        self.repository
+            .create(caller, draft)
+            .await
+            .map_err(to_error)
     }
 
     #[tracing::instrument(name = "SchemaService.FindById", skip_all, fields(schema.id = %id))]
-    async fn find_by_id(&self, id: &str) -> Result<Schema, Error> {
+    async fn find_by_id(&self, caller: Uuid, id: &str) -> Result<Schema, Error> {
         self.repository
-            .find_by_id(id)
+            .find_by_id(caller, id)
             .await
             .map_err(to_error)?
             .ok_or_else(|| Error::not_found("schema does not exist"))
     }
 
     #[tracing::instrument(name = "SchemaService.Replace", skip_all, fields(schema.id = %id))]
-    async fn replace(&self, id: &str, draft: SchemaDraft) -> Result<Schema, Error> {
+    async fn replace(&self, caller: Uuid, id: &str, draft: SchemaDraft) -> Result<Schema, Error> {
         Self::check_draft(&draft)?;
 
-        self.repository.replace(id, draft).await.map_err(to_error)
+        self.repository
+            .replace(caller, id, draft)
+            .await
+            .map_err(to_error)
     }
 
     #[tracing::instrument(name = "SchemaService.Delete", skip_all, fields(schema.id = %id))]
-    async fn delete(&self, id: &str) -> Result<(), Error> {
-        self.repository.delete(id).await.map_err(to_error)
+    async fn delete(&self, caller: Uuid, id: &str) -> Result<(), Error> {
+        self.repository.delete(caller, id).await.map_err(to_error)
     }
 
     #[tracing::instrument(name = "SchemaService.Validate", skip_all)]
-    async fn validate(&self, target: ValidationTarget) -> Result<Report, Error> {
-        let schema = self.resolve(target).await?;
+    async fn validate(&self, caller: Uuid, target: ValidationTarget) -> Result<Report, Error> {
+        let schema = self.resolve(caller, target).await?;
 
         Ok(self.verifier.verify(&schema))
     }
 
     #[tracing::instrument(name = "SchemaService.GenerateDdl", skip_all)]
-    async fn generate_ddl(&self, request: GenerateRequest) -> Result<Generated, Error> {
+    async fn generate_ddl(
+        &self,
+        caller: Uuid,
+        request: GenerateRequest,
+    ) -> Result<Generated, Error> {
         let generator = self.generator_for(request.dialect)?;
 
-        let schema = self.resolve(request.target).await?;
+        let schema = self.resolve(caller, request.target).await?;
         let report = self.verifier.verify(&schema);
 
         // SQL built from a broken diagram is SQL no database would accept, so
@@ -160,8 +179,8 @@ impl SchemaService for SchemaServiceImpl {
     }
 
     #[tracing::instrument(name = "SchemaService.Export", skip_all)]
-    async fn export(&self, request: ExportRequest) -> Result<Exported, Error> {
-        let schema = self.resolve(request.target).await?;
+    async fn export(&self, caller: Uuid, request: ExportRequest) -> Result<Exported, Error> {
+        let schema = self.resolve(caller, request.target).await?;
 
         // Exporting is not generating. A half-drawn diagram is worth saving
         // to a file and coming back to, so nothing is verified here.
@@ -198,20 +217,34 @@ mod tests {
     use crate::module::schema::core::service::{PostgresGenerator, SchemaVerifier};
     use crate::package::errdef::code;
 
+    fn caller() -> Uuid {
+        Uuid::from_u128(1)
+    }
+
+    fn someone_else() -> Uuid {
+        Uuid::from_u128(2)
+    }
+
     fn now() -> DateTime<Utc> {
         DateTime::from_timestamp(1_700_000_000, 0).expect("a fixed instant")
     }
 
+    /// The store keeps who owns what, and answers each caller only about
+    /// their own, the same as the real one.
     #[derive(Default)]
     struct FakeRepository {
-        schemas: Mutex<Vec<Schema>>,
+        schemas: Mutex<Vec<(Uuid, Schema)>>,
         fail_with: Option<fn() -> DomainError>,
     }
 
     impl FakeRepository {
         fn holding(schemas: Vec<Schema>) -> Self {
+            Self::owned_by(caller(), schemas)
+        }
+
+        fn owned_by(owner: Uuid, schemas: Vec<Schema>) -> Self {
             Self {
-                schemas: Mutex::new(schemas),
+                schemas: Mutex::new(schemas.into_iter().map(|schema| (owner, schema)).collect()),
                 fail_with: None,
             }
         }
@@ -229,20 +262,40 @@ mod tests {
                 None => Ok(()),
             }
         }
+
+        fn lock(&self) -> std::sync::MutexGuard<'_, Vec<(Uuid, Schema)>> {
+            self.schemas.lock().expect("the lock should be held")
+        }
+
+        fn is_empty(&self) -> bool {
+            self.lock().is_empty()
+        }
+
+        fn name_taken(schemas: &[(Uuid, Schema)], owner: Uuid, name: &str, except: &str) -> bool {
+            schemas.iter().any(|(by, schema)| {
+                *by == owner && schema.id != except && schema.name.eq_ignore_ascii_case(name)
+            })
+        }
     }
 
     #[async_trait]
     impl SchemaRepository for FakeRepository {
         async fn index(
             &self,
+            owner: Uuid,
             request: &ListRequest,
         ) -> Result<(Vec<SchemaSummary>, i64), DomainError> {
             self.guard()?;
 
-            let schemas = self.schemas.lock().expect("the lock should be held");
-            let total = schemas.len() as i64;
-            let page = schemas
+            let schemas = self.lock();
+            let mine: Vec<&Schema> = schemas
                 .iter()
+                .filter(|(by, _)| *by == owner)
+                .map(|(_, schema)| schema)
+                .collect();
+            let total = mine.len() as i64;
+            let page = mine
+                .into_iter()
                 .skip(request.offset() as usize)
                 .take(request.per_page as usize)
                 .map(Schema::summary)
@@ -251,49 +304,62 @@ mod tests {
             Ok((page, total))
         }
 
-        async fn create(&self, draft: SchemaDraft) -> Result<Schema, DomainError> {
+        async fn create(&self, owner: Uuid, draft: SchemaDraft) -> Result<Schema, DomainError> {
             self.guard()?;
 
-            let schema = Schema::new("s-new", draft, now());
-            self.schemas
-                .lock()
-                .expect("the lock should be held")
-                .push(schema.clone());
+            let mut schemas = self.lock();
+
+            if Self::name_taken(&schemas, owner, &draft.name, "") {
+                return Err(DomainError::DuplicateSchemaName(draft.name));
+            }
+
+            let schema = Schema::new(format!("s-{}", schemas.len() + 1), draft, now());
+            schemas.push((owner, schema.clone()));
 
             Ok(schema)
         }
 
-        async fn find_by_id(&self, id: &str) -> Result<Option<Schema>, DomainError> {
+        async fn find_by_id(&self, owner: Uuid, id: &str) -> Result<Option<Schema>, DomainError> {
             self.guard()?;
 
             Ok(self
-                .schemas
                 .lock()
-                .expect("the lock should be held")
                 .iter()
-                .find(|schema| schema.id == id)
-                .cloned())
+                .find(|(by, schema)| *by == owner && schema.id == id)
+                .map(|(_, schema)| schema.clone()))
         }
 
-        async fn find_by_name(&self, name: &str) -> Result<Option<Schema>, DomainError> {
+        async fn find_by_name(
+            &self,
+            owner: Uuid,
+            name: &str,
+        ) -> Result<Option<Schema>, DomainError> {
             self.guard()?;
 
             Ok(self
-                .schemas
                 .lock()
-                .expect("the lock should be held")
                 .iter()
-                .find(|schema| schema.name == name)
-                .cloned())
+                .find(|(by, schema)| *by == owner && schema.name.eq_ignore_ascii_case(name))
+                .map(|(_, schema)| schema.clone()))
         }
 
-        async fn replace(&self, id: &str, draft: SchemaDraft) -> Result<Schema, DomainError> {
+        async fn replace(
+            &self,
+            owner: Uuid,
+            id: &str,
+            draft: SchemaDraft,
+        ) -> Result<Schema, DomainError> {
             self.guard()?;
 
-            let mut schemas = self.schemas.lock().expect("the lock should be held");
-            let schema = schemas
+            let mut schemas = self.lock();
+
+            if Self::name_taken(&schemas, owner, &draft.name, id) {
+                return Err(DomainError::DuplicateSchemaName(draft.name));
+            }
+
+            let (_, schema) = schemas
                 .iter_mut()
-                .find(|schema| schema.id == id)
+                .find(|(by, schema)| *by == owner && schema.id == id)
                 .ok_or(DomainError::SchemaNotFound)?;
 
             schema.replace_with(draft, now());
@@ -301,12 +367,12 @@ mod tests {
             Ok(schema.clone())
         }
 
-        async fn delete(&self, id: &str) -> Result<(), DomainError> {
+        async fn delete(&self, owner: Uuid, id: &str) -> Result<(), DomainError> {
             self.guard()?;
 
-            let mut schemas = self.schemas.lock().expect("the lock should be held");
+            let mut schemas = self.lock();
             let before = schemas.len();
-            schemas.retain(|schema| schema.id != id);
+            schemas.retain(|(by, schema)| !(*by == owner && schema.id == id));
 
             if schemas.len() == before {
                 return Err(DomainError::SchemaNotFound);
@@ -379,7 +445,7 @@ mod tests {
         let service = service(FakeRepository::default());
 
         let schema = service
-            .create(draft("blog"))
+            .create(caller(), draft("blog"))
             .await
             .expect("creation should succeed");
 
@@ -394,7 +460,7 @@ mod tests {
         }));
 
         let error = service
-            .create(draft("   "))
+            .create(caller(), draft("   "))
             .await
             .expect_err("creation should fail");
 
@@ -407,7 +473,7 @@ mod tests {
         let service = service(FakeRepository::default());
 
         let error = service
-            .create(draft(&"n".repeat(MAX_NAME_LENGTH + 1)))
+            .create(caller(), draft(&"n".repeat(MAX_NAME_LENGTH + 1)))
             .await
             .expect_err("creation should fail");
 
@@ -419,7 +485,7 @@ mod tests {
         let service = service(FakeRepository::default());
 
         assert!(service
-            .create(draft(&"n".repeat(MAX_NAME_LENGTH)))
+            .create(caller(), draft(&"n".repeat(MAX_NAME_LENGTH)))
             .await
             .is_ok());
     }
@@ -429,7 +495,7 @@ mod tests {
         let service = service(FakeRepository::default());
 
         let error = service
-            .find_by_id("nope")
+            .find_by_id(caller(), "nope")
             .await
             .expect_err("the lookup should fail");
 
@@ -443,7 +509,7 @@ mod tests {
         }));
 
         let error = service
-            .create(draft("blog"))
+            .create(caller(), draft("blog"))
             .await
             .expect_err("creation should fail");
 
@@ -458,7 +524,7 @@ mod tests {
         }));
 
         let error = service
-            .find_by_id("s1")
+            .find_by_id(caller(), "s1")
             .await
             .expect_err("the lookup should fail");
 
@@ -474,7 +540,7 @@ mod tests {
         let service = service(FakeRepository::holding(vec![stored("s1", "blog")]));
 
         let schema = service
-            .replace("s1", draft("renamed"))
+            .replace(caller(), "s1", draft("renamed"))
             .await
             .expect("the replace should succeed");
 
@@ -487,7 +553,7 @@ mod tests {
         let service = service(FakeRepository::holding(vec![stored("s1", "blog")]));
 
         let error = service
-            .replace("s1", draft(""))
+            .replace(caller(), "s1", draft(""))
             .await
             .expect_err("the replace should fail");
 
@@ -498,10 +564,10 @@ mod tests {
     async fn deleting_a_missing_schema_is_a_not_found() {
         let service = service(FakeRepository::holding(vec![stored("s1", "blog")]));
 
-        assert!(service.delete("s1").await.is_ok());
+        assert!(service.delete(caller(), "s1").await.is_ok());
         assert_eq!(
             service
-                .delete("s1")
+                .delete(caller(), "s1")
                 .await
                 .expect_err("the second delete should fail")
                 .app_code(),
@@ -518,7 +584,7 @@ mod tests {
         ]));
 
         let page = service
-            .index(ListRequest::from_query("page=1&per_page=2"))
+            .index(caller(), ListRequest::from_query("page=1&per_page=2"))
             .await
             .expect("the listing should succeed");
 
@@ -531,7 +597,7 @@ mod tests {
         let service = service(FakeRepository::default());
 
         let error = service
-            .validate(ValidationTarget::Stored("nope".to_owned()))
+            .validate(caller(), ValidationTarget::Stored("nope".to_owned()))
             .await
             .expect_err("validation should fail");
 
@@ -552,7 +618,7 @@ mod tests {
         );
 
         let report = service
-            .validate(ValidationTarget::Stored("s1".to_owned()))
+            .validate(caller(), ValidationTarget::Stored("s1".to_owned()))
             .await
             .expect("validation should run");
 
@@ -578,7 +644,10 @@ mod tests {
         );
 
         let report = service
-            .validate(ValidationTarget::Draft(Box::new(stored("", "draft"))))
+            .validate(
+                caller(),
+                ValidationTarget::Draft(Box::new(stored("", "draft"))),
+            )
             .await
             .expect("validation should run");
 
@@ -586,11 +655,7 @@ mod tests {
             report.has(diagnostic_code::MISSING_PRIMARY_KEY),
             "the draft's users table has no key"
         );
-        assert!(repository
-            .schemas
-            .lock()
-            .expect("the lock should be held")
-            .is_empty());
+        assert!(repository.is_empty());
     }
 
     fn generate(service: &SchemaServiceImpl, id: &str) -> GenerateRequest {
@@ -606,7 +671,7 @@ mod tests {
         let service = service(FakeRepository::holding(vec![blog("s1")]));
 
         let generated = service
-            .generate_ddl(generate(&service, "s1"))
+            .generate_ddl(caller(), generate(&service, "s1"))
             .await
             .expect("generation should run");
 
@@ -620,7 +685,7 @@ mod tests {
         let service = service(FakeRepository::holding(vec![stored("s1", "blog")]));
 
         let generated = service
-            .generate_ddl(generate(&service, "s1"))
+            .generate_ddl(caller(), generate(&service, "s1"))
             .await
             .expect("a broken schema is an answer, not a failure");
 
@@ -636,7 +701,7 @@ mod tests {
         let service = service(FakeRepository::holding(vec![schema]));
 
         let generated = service
-            .generate_ddl(generate(&service, "s1"))
+            .generate_ddl(caller(), generate(&service, "s1"))
             .await
             .expect("generation should run");
 
@@ -655,11 +720,14 @@ mod tests {
         let service = service(FakeRepository::holding(vec![blog("s1")]));
 
         let error = service
-            .generate_ddl(GenerateRequest {
-                target: ValidationTarget::Stored("s1".to_owned()),
-                dialect: Dialect::MySql,
-                options: GenerateOptions::default(),
-            })
+            .generate_ddl(
+                caller(),
+                GenerateRequest {
+                    target: ValidationTarget::Stored("s1".to_owned()),
+                    dialect: Dialect::MySql,
+                    options: GenerateOptions::default(),
+                },
+            )
             .await
             .expect_err("only postgres is registered");
 
@@ -672,11 +740,14 @@ mod tests {
         let service = service(FakeRepository::holding(vec![stored("s1", "blog")]));
 
         let exported = service
-            .export(ExportRequest {
-                target: ValidationTarget::Stored("s1".to_owned()),
-                format: ExchangeFormat::Json,
-                include_positions: true,
-            })
+            .export(
+                caller(),
+                ExportRequest {
+                    target: ValidationTarget::Stored("s1".to_owned()),
+                    format: ExchangeFormat::Json,
+                    include_positions: true,
+                },
+            )
             .await
             .expect("export should run on a half-drawn diagram");
 
@@ -694,20 +765,19 @@ mod tests {
         );
 
         let exported = service
-            .export(ExportRequest {
-                target: ValidationTarget::Draft(Box::new(blog("s1"))),
-                format: ExchangeFormat::Json,
-                include_positions: true,
-            })
+            .export(
+                caller(),
+                ExportRequest {
+                    target: ValidationTarget::Draft(Box::new(blog("s1"))),
+                    format: ExchangeFormat::Json,
+                    include_positions: true,
+                },
+            )
             .await
             .expect("export should run");
 
         assert!(exported.content.contains("\"users\""));
-        assert!(repository
-            .schemas
-            .lock()
-            .expect("the lock should be held")
-            .is_empty());
+        assert!(repository.is_empty());
     }
 
     #[tokio::test]
@@ -715,11 +785,14 @@ mod tests {
         let service = service(FakeRepository::default());
 
         let error = service
-            .export(ExportRequest {
-                target: ValidationTarget::Stored("nope".to_owned()),
-                format: ExchangeFormat::Json,
-                include_positions: true,
-            })
+            .export(
+                caller(),
+                ExportRequest {
+                    target: ValidationTarget::Stored("nope".to_owned()),
+                    format: ExchangeFormat::Json,
+                    include_positions: true,
+                },
+            )
             .await
             .expect_err("export should fail");
 
@@ -746,11 +819,7 @@ mod tests {
 
         assert_eq!(imported.draft.name, "blog");
         assert!(imported.draft.id.is_empty(), "nothing was stored");
-        assert!(repository
-            .schemas
-            .lock()
-            .expect("the lock should be held")
-            .is_empty());
+        assert!(repository.is_empty());
     }
 
     #[tokio::test]
@@ -774,10 +843,115 @@ mod tests {
         let service = service(FakeRepository::default());
 
         let error = service
-            .generate_ddl(generate(&service, "nope"))
+            .generate_ddl(caller(), generate(&service, "nope"))
             .await
             .expect_err("generation should fail");
 
         assert_eq!(error.app_code(), code::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_listing_only_holds_the_callers_own_schemas() {
+        let repository = FakeRepository::owned_by(someone_else(), vec![stored("s1", "theirs")]);
+        repository
+            .create(caller(), draft("mine"))
+            .await
+            .expect("the insert should succeed");
+        let service = service(repository);
+
+        let page = service
+            .index(caller(), ListRequest::default())
+            .await
+            .expect("the listing should succeed");
+
+        assert_eq!(page.meta.total_count, 1);
+        assert_eq!(page.data[0].name, "mine");
+    }
+
+    #[tokio::test]
+    async fn someone_elses_schema_reads_as_missing_rather_than_forbidden() {
+        let service = service(FakeRepository::owned_by(
+            someone_else(),
+            vec![stored("s1", "theirs")],
+        ));
+
+        let error = service
+            .find_by_id(caller(), "s1")
+            .await
+            .expect_err("the lookup should fail");
+
+        assert_eq!(error.app_code(), code::NOT_FOUND);
+        assert_eq!(
+            service
+                .replace(caller(), "s1", draft("taken over"))
+                .await
+                .expect_err("the replace should fail")
+                .app_code(),
+            code::NOT_FOUND
+        );
+        assert_eq!(
+            service
+                .delete(caller(), "s1")
+                .await
+                .expect_err("the delete should fail")
+                .app_code(),
+            code::NOT_FOUND
+        );
+        assert!(
+            service.find_by_id(someone_else(), "s1").await.is_ok(),
+            "nothing was touched"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_people_can_each_have_a_schema_with_the_same_name() {
+        let service = service(FakeRepository::default());
+
+        service
+            .create(caller(), draft("shop"))
+            .await
+            .expect("the first shop should be created");
+        service
+            .create(someone_else(), draft("shop"))
+            .await
+            .expect("another person's shop should be created too");
+
+        assert_eq!(
+            service
+                .create(caller(), draft("shop"))
+                .await
+                .expect_err("one person cannot have two")
+                .app_code(),
+            code::RESOURCE_CONFLICT
+        );
+    }
+
+    #[tokio::test]
+    async fn validating_generating_and_exporting_someone_elses_schema_is_a_not_found() {
+        let service = service(FakeRepository::owned_by(someone_else(), vec![blog("s1")]));
+
+        let validated = service
+            .validate(caller(), ValidationTarget::Stored("s1".to_owned()))
+            .await
+            .expect_err("validation should fail");
+        let generated = service
+            .generate_ddl(caller(), generate(&service, "s1"))
+            .await
+            .expect_err("generation should fail");
+        let exported = service
+            .export(
+                caller(),
+                ExportRequest {
+                    target: ValidationTarget::Stored("s1".to_owned()),
+                    format: ExchangeFormat::Json,
+                    include_positions: true,
+                },
+            )
+            .await
+            .expect_err("export should fail");
+
+        assert_eq!(validated.app_code(), code::NOT_FOUND);
+        assert_eq!(generated.app_code(), code::NOT_FOUND);
+        assert_eq!(exported.app_code(), code::NOT_FOUND);
     }
 }
