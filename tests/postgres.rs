@@ -974,6 +974,12 @@ async fn a_role_without_permissions_lists_nothing() {
 // ──── Schema repository ──────────────────────────────────
 
 impl Fixture {
+    /// The owner is a user id held by value, so a test needs an id rather
+    /// than a user.
+    fn an_owner(&self) -> Uuid {
+        Uuid::new_v4()
+    }
+
     fn a_new_schema(&self, name: &str) -> SchemaDraft {
         SchemaDraft {
             name: format!("{name}_{}", self.tag),
@@ -1018,48 +1024,34 @@ impl Fixture {
         }
     }
 
-    /// The table is shared with whatever else is running, and a listing has no
-    /// filter, so a schema is located by walking the pages rather than by
-    /// assuming it landed on the first one.
-    async fn find_summary(&self, name: &str) -> Option<SchemaSummary> {
-        let mut page = 1;
+    /// A listing only holds the owner's schemas, and a test makes its own
+    /// owner, so everything it stored fits on the first page.
+    async fn find_summary(&self, owner: Uuid, name: &str) -> Option<SchemaSummary> {
+        let (summaries, _) = self
+            .schemas
+            .index(owner, &ListRequest::from_query("page=1&per_page=50"))
+            .await
+            .expect("the listing should succeed");
 
-        loop {
-            let (summaries, total) = self
-                .schemas
-                .index(&ListRequest::from_query(&format!(
-                    "page={page}&per_page=50"
-                )))
-                .await
-                .expect("the listing should succeed");
-
-            if let Some(found) = summaries.iter().find(|s| s.name == name) {
-                return Some(found.clone());
-            }
-
-            if summaries.is_empty() || page * 50 >= total {
-                return None;
-            }
-
-            page += 1;
-        }
+        summaries.into_iter().find(|s| s.name == name)
     }
 }
 
 #[tokio::test]
 async fn a_created_schema_comes_back_with_every_part_of_the_drawing() {
     let fx = database!();
+    let owner = fx.an_owner();
 
     let draft = fx.a_new_schema("round_trip");
     let created = fx
         .schemas
-        .create(draft.clone())
+        .create(owner, draft.clone())
         .await
         .expect("the insert should succeed");
 
     let found = fx
         .schemas
-        .find_by_id(&created.id)
+        .find_by_id(owner, &created.id)
         .await
         .expect("the lookup should succeed")
         .expect("the schema should exist");
@@ -1077,10 +1069,11 @@ async fn a_created_schema_comes_back_with_every_part_of_the_drawing() {
 #[tokio::test]
 async fn a_duplicate_schema_name_is_refused_regardless_of_case() {
     let fx = database!();
+    let owner = fx.an_owner();
 
     let draft = fx.a_new_schema("duplicate");
     fx.schemas
-        .create(draft.clone())
+        .create(owner, draft.clone())
         .await
         .expect("the first insert should succeed");
 
@@ -1091,7 +1084,7 @@ async fn a_duplicate_schema_name_is_refused_regardless_of_case() {
 
     assert!(matches!(
         fx.schemas
-            .create(shouted)
+            .create(owner, shouted)
             .await
             .expect_err("the second insert should fail"),
         SchemaError::DuplicateSchemaName(_)
@@ -1101,17 +1094,18 @@ async fn a_duplicate_schema_name_is_refused_regardless_of_case() {
 #[tokio::test]
 async fn finds_a_schema_by_name_regardless_of_case() {
     let fx = database!();
+    let owner = fx.an_owner();
 
     let draft = fx.a_new_schema("by_name");
     let created = fx
         .schemas
-        .create(draft.clone())
+        .create(owner, draft.clone())
         .await
         .expect("the insert should succeed");
 
     let found = fx
         .schemas
-        .find_by_name(&draft.name.to_uppercase())
+        .find_by_name(owner, &draft.name.to_uppercase())
         .await
         .expect("the lookup should succeed")
         .expect("the schema should exist");
@@ -1122,10 +1116,11 @@ async fn finds_a_schema_by_name_regardless_of_case() {
 #[tokio::test]
 async fn replacing_a_schema_keeps_its_id_and_its_creation_time() {
     let fx = database!();
+    let owner = fx.an_owner();
 
     let created = fx
         .schemas
-        .create(fx.a_new_schema("replace"))
+        .create(owner, fx.a_new_schema("replace"))
         .await
         .expect("the insert should succeed");
 
@@ -1136,7 +1131,7 @@ async fn replacing_a_schema_keeps_its_id_and_its_creation_time() {
 
     let replaced = fx
         .schemas
-        .replace(&created.id, draft)
+        .replace(owner, &created.id, draft)
         .await
         .expect("the update should succeed");
 
@@ -1151,22 +1146,23 @@ async fn replacing_a_schema_keeps_its_id_and_its_creation_time() {
 #[tokio::test]
 async fn renaming_onto_another_schemas_name_is_refused() {
     let fx = database!();
+    let owner = fx.an_owner();
 
     let taken = fx.a_new_schema("rename_target");
     fx.schemas
-        .create(taken.clone())
+        .create(owner, taken.clone())
         .await
         .expect("the first insert should succeed");
 
     let other = fx
         .schemas
-        .create(fx.a_new_schema("rename_source"))
+        .create(owner, fx.a_new_schema("rename_source"))
         .await
         .expect("the second insert should succeed");
 
     assert!(matches!(
         fx.schemas
-            .replace(&other.id, taken)
+            .replace(owner, &other.id, taken)
             .await
             .expect_err("the rename should fail"),
         SchemaError::DuplicateSchemaName(_)
@@ -1176,10 +1172,11 @@ async fn renaming_onto_another_schemas_name_is_refused() {
 #[tokio::test]
 async fn a_missing_schema_is_none_rather_than_an_error() {
     let fx = database!();
+    let owner = fx.an_owner();
 
     assert!(fx
         .schemas
-        .find_by_id(&Uuid::new_v4().to_string())
+        .find_by_id(owner, &Uuid::new_v4().to_string())
         .await
         .expect("the lookup should succeed")
         .is_none());
@@ -1188,7 +1185,7 @@ async fn a_missing_schema_is_none_rather_than_an_error() {
     // than as a different kind of failure the caller has to tell apart.
     assert!(fx
         .schemas
-        .find_by_id("not-a-uuid")
+        .find_by_id(owner, "not-a-uuid")
         .await
         .expect("the lookup should succeed")
         .is_none());
@@ -1197,12 +1194,13 @@ async fn a_missing_schema_is_none_rather_than_an_error() {
 #[tokio::test]
 async fn replacing_or_deleting_a_missing_schema_reports_it_missing() {
     let fx = database!();
+    let owner = fx.an_owner();
 
     let absent = Uuid::new_v4().to_string();
 
     assert!(matches!(
         fx.schemas
-            .replace(&absent, fx.a_new_schema("absent"))
+            .replace(owner, &absent, fx.a_new_schema("absent"))
             .await
             .expect_err("the update should fail"),
         SchemaError::SchemaNotFound
@@ -1210,7 +1208,7 @@ async fn replacing_or_deleting_a_missing_schema_reports_it_missing() {
 
     assert!(matches!(
         fx.schemas
-            .delete(&absent)
+            .delete(owner, &absent)
             .await
             .expect_err("the delete should fail"),
         SchemaError::SchemaNotFound
@@ -1220,21 +1218,22 @@ async fn replacing_or_deleting_a_missing_schema_reports_it_missing() {
 #[tokio::test]
 async fn deleting_twice_reports_the_second_as_missing() {
     let fx = database!();
+    let owner = fx.an_owner();
 
     let created = fx
         .schemas
-        .create(fx.a_new_schema("delete"))
+        .create(owner, fx.a_new_schema("delete"))
         .await
         .expect("the insert should succeed");
 
     fx.schemas
-        .delete(&created.id)
+        .delete(owner, &created.id)
         .await
         .expect("the first delete should succeed");
 
     assert!(matches!(
         fx.schemas
-            .delete(&created.id)
+            .delete(owner, &created.id)
             .await
             .expect_err("the second delete should fail"),
         SchemaError::SchemaNotFound
@@ -1244,15 +1243,16 @@ async fn deleting_twice_reports_the_second_as_missing() {
 #[tokio::test]
 async fn a_listing_counts_the_drawing_without_returning_it() {
     let fx = database!();
+    let owner = fx.an_owner();
 
     let draft = fx.a_new_schema("listing");
     fx.schemas
-        .create(draft.clone())
+        .create(owner, draft.clone())
         .await
         .expect("the insert should succeed");
 
     let summary = fx
-        .find_summary(&draft.name)
+        .find_summary(owner, &draft.name)
         .await
         .expect("the schema should be listed");
 
@@ -1263,17 +1263,18 @@ async fn a_listing_counts_the_drawing_without_returning_it() {
 #[tokio::test]
 async fn a_listing_never_returns_more_than_a_page() {
     let fx = database!();
+    let owner = fx.an_owner();
 
     for index in 0..3 {
         fx.schemas
-            .create(fx.a_new_schema(&format!("page_{index}")))
+            .create(owner, fx.a_new_schema(&format!("page_{index}")))
             .await
             .expect("the insert should succeed");
     }
 
     let (summaries, total) = fx
         .schemas
-        .index(&ListRequest::from_query("page=1&per_page=2"))
+        .index(owner, &ListRequest::from_query("page=1&per_page=2"))
         .await
         .expect("the listing should succeed");
 
@@ -1284,14 +1285,91 @@ async fn a_listing_never_returns_more_than_a_page() {
 #[tokio::test]
 async fn a_page_past_the_end_is_empty_rather_than_an_error() {
     let fx = database!();
+    let owner = fx.an_owner();
 
     let (summaries, _) = fx
         .schemas
-        .index(&ListRequest::from_query("page=100000&per_page=10"))
+        .index(owner, &ListRequest::from_query("page=100000&per_page=10"))
         .await
         .expect("the listing should succeed");
 
     assert!(summaries.is_empty());
+}
+
+#[tokio::test]
+async fn a_user_cannot_see_or_touch_another_users_schema() {
+    let fx = database!();
+    let owner = fx.an_owner();
+    let someone_else = fx.an_owner();
+
+    let draft = fx.a_new_schema("private");
+    let created = fx
+        .schemas
+        .create(owner, draft.clone())
+        .await
+        .expect("the insert should succeed");
+
+    assert!(fx.find_summary(someone_else, &draft.name).await.is_none());
+    assert!(fx
+        .schemas
+        .find_by_id(someone_else, &created.id)
+        .await
+        .expect("the lookup should succeed")
+        .is_none());
+    assert!(fx
+        .schemas
+        .find_by_name(someone_else, &draft.name)
+        .await
+        .expect("the lookup should succeed")
+        .is_none());
+    assert!(matches!(
+        fx.schemas
+            .replace(someone_else, &created.id, fx.a_new_schema("taken_over"))
+            .await
+            .expect_err("the update should fail"),
+        SchemaError::SchemaNotFound
+    ));
+    assert!(matches!(
+        fx.schemas
+            .delete(someone_else, &created.id)
+            .await
+            .expect_err("the delete should fail"),
+        SchemaError::SchemaNotFound
+    ));
+
+    let untouched = fx
+        .schemas
+        .find_by_id(owner, &created.id)
+        .await
+        .expect("the lookup should succeed")
+        .expect("the owner still has the schema");
+
+    assert_eq!(untouched.name, draft.name);
+}
+
+#[tokio::test]
+async fn two_users_can_each_have_a_schema_with_the_same_name() {
+    let fx = database!();
+    let owner = fx.an_owner();
+    let someone_else = fx.an_owner();
+
+    let draft = fx.a_new_schema("shop");
+    fx.schemas
+        .create(owner, draft.clone())
+        .await
+        .expect("the first shop should be stored");
+    fx.schemas
+        .create(someone_else, draft.clone())
+        .await
+        .expect("another person's shop should be stored too");
+
+    assert!(matches!(
+        fx.schemas
+            .create(owner, draft)
+            .await
+            .expect_err("one person cannot have two"),
+        SchemaError::DuplicateSchemaName(_)
+    ));
 }
 
 /// The acceptance check the proposal asks for: a real PostgreSQL runs the

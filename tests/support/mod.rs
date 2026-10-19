@@ -337,32 +337,54 @@ impl PermissionService for FakePermissionService {
 /// The store the transport tests run against. The real one is PostgreSQL, and
 /// these tests are about the JSON and protobuf mapping rather than about
 /// persistence, so they keep their own store instead of needing a database.
+/// Like the real one it remembers who owns each schema and answers a caller
+/// only about their own.
 ///
 /// Persistence itself is covered in `tests/postgres.rs`.
 #[derive(Default)]
 pub struct FakeSchemaRepository {
-    schemas: Mutex<HashMap<String, Schema>>,
+    schemas: Mutex<HashMap<String, (Uuid, Schema)>>,
 }
 
 impl FakeSchemaRepository {
-    fn read(&self) -> std::sync::MutexGuard<'_, HashMap<String, Schema>> {
+    fn read(&self) -> std::sync::MutexGuard<'_, HashMap<String, (Uuid, Schema)>> {
         self.schemas.lock().expect("the store lock should be sound")
     }
 
-    fn sorted(schemas: &HashMap<String, Schema>) -> Vec<&Schema> {
-        let mut all: Vec<&Schema> = schemas.values().collect();
-        all.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
-        all
+    fn owned_by(schemas: &HashMap<String, (Uuid, Schema)>, owner: Uuid) -> Vec<&Schema> {
+        let mut mine: Vec<&Schema> = schemas
+            .values()
+            .filter(|(by, _)| *by == owner)
+            .map(|(_, schema)| schema)
+            .collect();
+        mine.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+        mine
+    }
+
+    fn name_taken(
+        schemas: &HashMap<String, (Uuid, Schema)>,
+        owner: Uuid,
+        name: &str,
+        except: &str,
+    ) -> bool {
+        Self::owned_by(schemas, owner)
+            .into_iter()
+            .any(|schema| schema.id != except && schema.name.eq_ignore_ascii_case(name))
     }
 }
 
 #[async_trait]
 impl SchemaRepository for FakeSchemaRepository {
-    async fn index(&self, request: &ListRequest) -> Result<(Vec<SchemaSummary>, i64), DomainError> {
+    async fn index(
+        &self,
+        owner: Uuid,
+        request: &ListRequest,
+    ) -> Result<(Vec<SchemaSummary>, i64), DomainError> {
         let schemas = self.read();
-        let total = schemas.len() as i64;
+        let mine = Self::owned_by(&schemas, owner);
+        let total = mine.len() as i64;
 
-        let page = Self::sorted(&schemas)
+        let page = mine
             .into_iter()
             .skip(request.offset() as usize)
             .take(request.per_page as usize)
@@ -372,55 +394,65 @@ impl SchemaRepository for FakeSchemaRepository {
         Ok((page, total))
     }
 
-    async fn create(&self, draft: SchemaDraft) -> Result<Schema, DomainError> {
+    async fn create(&self, owner: Uuid, draft: SchemaDraft) -> Result<Schema, DomainError> {
         let mut schemas = self.read();
 
-        if schemas
-            .values()
-            .any(|schema| schema.name.eq_ignore_ascii_case(&draft.name))
-        {
+        if Self::name_taken(&schemas, owner, &draft.name, "") {
             return Err(DomainError::DuplicateSchemaName(draft.name));
         }
 
         let schema = Schema::new(Uuid::new_v4().to_string(), draft, Utc::now());
-        schemas.insert(schema.id.clone(), schema.clone());
+        schemas.insert(schema.id.clone(), (owner, schema.clone()));
 
         Ok(schema)
     }
 
-    async fn find_by_id(&self, id: &str) -> Result<Option<Schema>, DomainError> {
-        Ok(self.read().get(id).cloned())
-    }
-
-    async fn find_by_name(&self, name: &str) -> Result<Option<Schema>, DomainError> {
+    async fn find_by_id(&self, owner: Uuid, id: &str) -> Result<Option<Schema>, DomainError> {
         Ok(self
             .read()
-            .values()
+            .get(id)
+            .filter(|(by, _)| *by == owner)
+            .map(|(_, schema)| schema.clone()))
+    }
+
+    async fn find_by_name(&self, owner: Uuid, name: &str) -> Result<Option<Schema>, DomainError> {
+        Ok(Self::owned_by(&self.read(), owner)
+            .into_iter()
             .find(|schema| schema.name.eq_ignore_ascii_case(name))
             .cloned())
     }
 
-    async fn replace(&self, id: &str, draft: SchemaDraft) -> Result<Schema, DomainError> {
+    async fn replace(
+        &self,
+        owner: Uuid,
+        id: &str,
+        draft: SchemaDraft,
+    ) -> Result<Schema, DomainError> {
         let mut schemas = self.read();
 
-        if schemas
-            .values()
-            .any(|schema| schema.id != id && schema.name.eq_ignore_ascii_case(&draft.name))
-        {
+        if Self::name_taken(&schemas, owner, &draft.name, id) {
             return Err(DomainError::DuplicateSchemaName(draft.name));
         }
 
-        let schema = schemas.get_mut(id).ok_or(DomainError::SchemaNotFound)?;
+        let (_, schema) = schemas
+            .get_mut(id)
+            .filter(|(by, _)| *by == owner)
+            .ok_or(DomainError::SchemaNotFound)?;
         schema.replace_with(draft, Utc::now());
 
         Ok(schema.clone())
     }
 
-    async fn delete(&self, id: &str) -> Result<(), DomainError> {
-        self.read()
-            .remove(id)
-            .map(|_| ())
-            .ok_or(DomainError::SchemaNotFound)
+    async fn delete(&self, owner: Uuid, id: &str) -> Result<(), DomainError> {
+        let mut schemas = self.read();
+
+        if !schemas.get(id).is_some_and(|(by, _)| *by == owner) {
+            return Err(DomainError::SchemaNotFound);
+        }
+
+        schemas.remove(id);
+
+        Ok(())
     }
 }
 
@@ -432,6 +464,7 @@ pub struct TestApp {
     pub router: Router,
     pub calls: Arc<Calls>,
     pub user: Identity,
+    auth: Arc<FakeAuth>,
 }
 
 impl TestApp {
@@ -449,9 +482,10 @@ impl TestApp {
         };
 
         let calls = Arc::new(Calls::default());
+        let auth = Arc::new(FakeAuth::for_user(identity.clone()));
 
         let modules = Modules {
-            auth: Arc::new(FakeAuth::for_user(identity.clone())),
+            auth: auth.clone(),
             rbac: Arc::new(FakeRbac {
                 allowed: allowed.iter().map(|a| (*a).to_owned()).collect(),
                 calls: calls.clone(),
@@ -477,11 +511,18 @@ impl TestApp {
             router: server::router(&modules),
             calls,
             user: identity,
+            auth,
         }
     }
 
     pub fn new() -> Self {
         Self::with_permissions(&["Users.View All"])
+    }
+
+    /// Signs a second person up and hands back their token, for the tests
+    /// about what one person can see of another's.
+    pub async fn another_user(&self) -> String {
+        another_user(&self.auth).await
     }
 
     pub async fn send(&self, request: Request<Body>) -> (StatusCode, Value) {
@@ -568,6 +609,17 @@ impl TestApp {
     }
 }
 
+async fn another_user(auth: &FakeAuth) -> String {
+    auth.register(Registration {
+        name: "Sam Stranger".to_owned(),
+        email: "stranger@example.com".to_owned(),
+        password: "a-long-enough-password".to_owned(),
+    })
+    .await
+    .expect("the sign up should succeed")
+    .token
+}
+
 pub fn authorized(method: &str, uri: &str, token: &str, body: Option<Value>) -> Request<Body> {
     let builder = Request::builder()
         .method(method)
@@ -623,6 +675,7 @@ pub struct TestServer {
     handle: JoinHandle<()>,
     pub calls: Arc<Calls>,
     pub user: Identity,
+    auth: Arc<FakeAuth>,
 }
 
 pub type Authorized = InterceptedService<
@@ -674,7 +727,8 @@ impl TestServer {
 
         let calls = Arc::new(Calls::default());
 
-        let auth: Arc<dyn Auth> = Arc::new(FakeAuth::for_user(identity.clone()));
+        let fake_auth = Arc::new(FakeAuth::for_user(identity.clone()));
+        let auth: Arc<dyn Auth> = fake_auth.clone();
         let rbac: Arc<dyn Engine> = Arc::new(FakeRbac {
             allowed: allowed.iter().map(|action| (*action).to_owned()).collect(),
             calls: calls.clone(),
@@ -699,7 +753,14 @@ impl TestServer {
             handle,
             calls,
             user: identity,
+            auth: fake_auth,
         }
+    }
+
+    /// Signs a second person up and hands back their token, for the tests
+    /// about what one person can see of another's.
+    pub async fn another_user(&self) -> String {
+        another_user(&self.auth).await
     }
 
     async fn channel(&self) -> Channel {
@@ -713,6 +774,31 @@ impl TestServer {
 
     pub async fn schema_client(&self) -> SchemaServiceClient<Authorized> {
         SchemaServiceClient::with_interceptor(self.channel().await, bearer as _)
+    }
+
+    /// A schema client that signs with a token the server just handed out.
+    pub async fn schema_client_with(
+        &self,
+        token: &str,
+    ) -> SchemaServiceClient<
+        InterceptedService<
+            Channel,
+            impl FnMut(tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status>,
+        >,
+    > {
+        let value: tonic::metadata::MetadataValue<_> = format!("Bearer {token}")
+            .parse()
+            .expect("the header should build");
+
+        SchemaServiceClient::with_interceptor(
+            self.channel().await,
+            move |mut request: tonic::Request<()>| {
+                request
+                    .metadata_mut()
+                    .insert("authorization", value.clone());
+                Ok(request)
+            },
+        )
     }
 
     pub async fn anonymous_schema_client(&self) -> SchemaServiceClient<Channel> {

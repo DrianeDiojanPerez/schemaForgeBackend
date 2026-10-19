@@ -3,7 +3,7 @@ mod support;
 use axum::http::StatusCode;
 use serde_json::{json, Value};
 
-use support::TestApp;
+use support::{authorized, TestApp};
 
 fn primary_key(id: &str, name: &str) -> Value {
     json!({
@@ -79,7 +79,9 @@ fn a_schema(name: &str) -> Value {
 }
 
 async fn created(app: &TestApp, name: &str) -> Value {
-    let (status, body) = app.post("/v1/schemas", a_schema(name)).await;
+    let (status, body) = app
+        .authorized("POST", "/v1/schemas", Some(a_schema(name)))
+        .await;
 
     assert_eq!(status, StatusCode::OK, "creation should succeed: {body}");
 
@@ -93,7 +95,7 @@ async fn a_schema_survives_a_round_trip_through_the_router() {
     let created = created(&app, "course registration").await;
 
     let (status, body) = app
-        .get(&format!("/v1/schemas/{}", created["id"].as_str().unwrap()))
+        .get_authorized(&format!("/v1/schemas/{}", created["id"].as_str().unwrap()))
         .await;
 
     assert_eq!(status, StatusCode::OK);
@@ -170,13 +172,66 @@ async fn a_foreign_key_reference_survives_the_round_trip() {
 }
 
 #[tokio::test]
+async fn a_call_without_a_token_is_turned_away() {
+    let app = TestApp::new();
+
+    let (status, body) = app.get("/v1/schemas").await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"]["message"], "malformed or missing jwt token");
+}
+
+#[tokio::test]
 async fn a_missing_schema_is_a_not_found() {
     let app = TestApp::new();
 
-    let (status, body) = app.get("/v1/schemas/does-not-exist").await;
+    let (status, body) = app.get_authorized("/v1/schemas/does-not-exist").await;
 
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["error"]["message"], "schema does not exist");
+}
+
+#[tokio::test]
+async fn a_schema_is_only_seen_by_the_person_who_made_it() {
+    let app = TestApp::new();
+
+    let created = created(&app, "private").await;
+    let id = created["id"].as_str().expect("an id should come back");
+    let token = app.another_user().await;
+
+    let (status, body) = app
+        .send(authorized("GET", "/v1/schemas", &token, None))
+        .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["pagination"]["total_count"], 0);
+
+    let (status, body) = app
+        .send(authorized(
+            "GET",
+            &format!("/v1/schemas/{id}"),
+            &token,
+            None,
+        ))
+        .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["message"], "schema does not exist");
+
+    let (status, _) = app
+        .send(authorized(
+            "POST",
+            "/v1/schemas",
+            &token,
+            Some(a_schema("private")),
+        ))
+        .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the same name is free for another person"
+    );
 }
 
 #[tokio::test]
@@ -185,7 +240,9 @@ async fn a_duplicate_name_is_refused() {
 
     created(&app, "blog").await;
 
-    let (status, body) = app.post("/v1/schemas", a_schema("blog")).await;
+    let (status, body) = app
+        .authorized("POST", "/v1/schemas", Some(a_schema("blog")))
+        .await;
 
     assert_eq!(status, StatusCode::CONFLICT);
     assert!(body["error"]["message"]
@@ -199,16 +256,17 @@ async fn a_malformed_schema_is_refused_with_the_paths_that_failed() {
     let app = TestApp::new();
 
     let (status, body) = app
-        .post(
+        .authorized(
+            "POST",
             "/v1/schemas",
-            json!({
+            Some(json!({
                 "name": "broken",
                 "entities": [{
                     "id": "e1",
                     "name": "",
                     "attributes": [{ "id": "a1", "name": "id", "primary_key": true }],
                 }],
-            }),
+            })),
         )
         .await;
 
@@ -229,7 +287,9 @@ async fn a_malformed_schema_is_refused_with_the_paths_that_failed() {
 async fn a_nameless_schema_is_refused() {
     let app = TestApp::new();
 
-    let (status, body) = app.post("/v1/schemas", json!({ "name": "  " })).await;
+    let (status, body) = app
+        .authorized("POST", "/v1/schemas", Some(json!({ "name": "  " })))
+        .await;
 
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(body["error"]["errors"].get("name").is_some());
@@ -243,7 +303,7 @@ async fn an_update_replaces_the_drawing_and_keeps_the_identity() {
     let id = created["id"].as_str().expect("an id should come back");
 
     let (status, body) = app
-        .request(
+        .authorized(
             "PUT",
             &format!("/v1/schemas/{id}"),
             Some(json!({
@@ -279,7 +339,7 @@ async fn a_listing_pages_and_reports_the_total() {
         created(&app, name).await;
     }
 
-    let (status, body) = app.get("/v1/schemas?page=1&per_page=2").await;
+    let (status, body) = app.get_authorized("/v1/schemas?page=1&per_page=2").await;
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["data"].as_array().map(Vec::len), Some(2));
@@ -302,12 +362,12 @@ async fn a_deleted_schema_is_gone() {
     let id = created["id"].as_str().expect("an id should come back");
 
     let (status, _) = app
-        .request("DELETE", &format!("/v1/schemas/{id}"), None)
+        .authorized("DELETE", &format!("/v1/schemas/{id}"), None)
         .await;
 
     assert_eq!(status, StatusCode::OK);
 
-    let (status, _) = app.get(&format!("/v1/schemas/{id}")).await;
+    let (status, _) = app.get_authorized(&format!("/v1/schemas/{id}")).await;
 
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
@@ -319,9 +379,10 @@ async fn a_stored_schema_is_validated_and_undocumented_columns_only_warn() {
     let created = created(&app, "validated").await;
 
     let (status, body) = app
-        .post(
+        .authorized(
+            "POST",
             "/v1/schemas/validate",
-            json!({ "schema_id": created["id"] }),
+            Some(json!({ "schema_id": created["id"] })),
         )
         .await;
 
@@ -340,13 +401,14 @@ async fn a_stored_schema_is_validated_and_undocumented_columns_only_warn() {
 
 async fn generated(app: &TestApp, schema_id: &Value, include_comments: bool) -> Value {
     let (status, body) = app
-        .post(
+        .authorized(
+            "POST",
             "/v1/schemas/generate-ddl",
-            json!({
+            Some(json!({
                 "schema_id": schema_id,
                 "dialect": "postgres",
                 "include_comments": include_comments,
-            }),
+            })),
         )
         .await;
 
@@ -427,14 +489,15 @@ async fn a_schema_with_a_defect_comes_back_as_diagnostics_rather_than_sql() {
     ));
 
     let (status, body) = app
-        .post(
+        .authorized(
+            "POST",
             "/v1/schemas",
-            json!({
+            Some(json!({
                 "name": "broken",
                 "description": "A table with no key",
                 "entities": entities,
                 "relationships": relationships,
-            }),
+            })),
         )
         .await;
 
@@ -461,13 +524,14 @@ async fn a_dialect_with_no_generator_reports_what_is_missing() {
     let created = created(&app, "unsupported").await;
 
     let (status, body) = app
-        .post(
+        .authorized(
+            "POST",
             "/v1/schemas/generate-ddl",
-            json!({
+            Some(json!({
                 "schema_id": created["id"],
                 "dialect": "mysql",
                 "include_comments": false,
-            }),
+            })),
         )
         .await;
 
@@ -490,15 +554,16 @@ async fn an_unsaved_draft_can_be_validated_without_being_stored() {
     ));
 
     let (status, body) = app
-        .post(
+        .authorized(
+            "POST",
             "/v1/schemas/validate",
-            json!({
+            Some(json!({
                 "schema": {
                     "name": "a draft",
                     "entities": entities,
                     "relationships": relationships,
                 },
-            }),
+            })),
         )
         .await;
 
@@ -515,7 +580,7 @@ async fn an_unsaved_draft_can_be_validated_without_being_stored() {
     assert_eq!(missing_key["severity"], "error");
     assert_eq!(missing_key["element_ids"], json!(["e3"]));
 
-    let (_, body) = app.get("/v1/schemas").await;
+    let (_, body) = app.get_authorized("/v1/schemas").await;
 
     assert_eq!(
         body["pagination"]["total_count"], 0,
@@ -527,7 +592,9 @@ async fn an_unsaved_draft_can_be_validated_without_being_stored() {
 async fn a_validation_without_a_target_is_refused() {
     let app = TestApp::new();
 
-    let (status, body) = app.post("/v1/schemas/validate", json!({})).await;
+    let (status, body) = app
+        .authorized("POST", "/v1/schemas/validate", Some(json!({})))
+        .await;
 
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(body["error"]["errors"].get("schema_id").is_some());
@@ -540,9 +607,10 @@ async fn a_client_that_says_nothing_about_positions_still_gets_the_layout() {
     let created = created(&app, "positioned").await;
 
     let (status, body) = app
-        .post(
+        .authorized(
+            "POST",
             "/v1/schemas/generate-ddl",
-            json!({ "schema_id": created["id"], "dialect": "postgres" }),
+            Some(json!({ "schema_id": created["id"], "dialect": "postgres" })),
         )
         .await;
 
@@ -551,7 +619,7 @@ async fn a_client_that_says_nothing_about_positions_still_gets_the_layout() {
         body["data"]["ddl"]
             .as_str()
             .expect("a script should come back")
-            .contains("-- @schemaforge layout 1\n-- @table \"students\" 40 80"),
+            .contains("-- @table \"students\" 40 80\nCREATE TABLE \"students\""),
         "{body}"
     );
 }
@@ -563,13 +631,14 @@ async fn positions_can_be_left_out_of_the_script() {
     let created = created(&app, "unpositioned").await;
 
     let (status, body) = app
-        .post(
+        .authorized(
+            "POST",
             "/v1/schemas/generate-ddl",
-            json!({
+            Some(json!({
                 "schema_id": created["id"],
                 "dialect": "postgres",
                 "include_positions": false,
-            }),
+            })),
         )
         .await;
 
@@ -577,7 +646,7 @@ async fn positions_can_be_left_out_of_the_script() {
     assert!(!body["data"]["ddl"]
         .as_str()
         .expect("a script should come back")
-        .contains("@schemaforge layout"));
+        .contains("-- @table"));
 }
 
 #[tokio::test]
@@ -587,7 +656,11 @@ async fn a_stored_schema_is_exported_as_a_json_file() {
     let created = created(&app, "course registration").await;
 
     let (status, body) = app
-        .post("/v1/schemas/export", json!({ "schema_id": created["id"] }))
+        .authorized(
+            "POST",
+            "/v1/schemas/export",
+            Some(json!({ "schema_id": created["id"] })),
+        )
         .await;
 
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -619,9 +692,10 @@ async fn an_export_can_leave_the_layout_behind() {
     let created = created(&app, "flat").await;
 
     let (status, body) = app
-        .post(
+        .authorized(
+            "POST",
             "/v1/schemas/export",
-            json!({ "schema_id": created["id"], "include_positions": false }),
+            Some(json!({ "schema_id": created["id"], "include_positions": false })),
         )
         .await;
 
@@ -647,9 +721,10 @@ async fn an_export_format_nobody_can_write_is_refused() {
     let created = created(&app, "unwritable").await;
 
     let (status, body) = app
-        .post(
+        .authorized(
+            "POST",
             "/v1/schemas/export",
-            json!({ "schema_id": created["id"], "format": "yaml" }),
+            Some(json!({ "schema_id": created["id"], "format": "yaml" })),
         )
         .await;
 
@@ -664,9 +739,10 @@ async fn exporting_as_sql_says_it_is_not_built_yet() {
     let created = created(&app, "sql export").await;
 
     let (status, _) = app
-        .post(
+        .authorized(
+            "POST",
             "/v1/schemas/export",
-            json!({ "schema_id": created["id"], "format": "sql" }),
+            Some(json!({ "schema_id": created["id"], "format": "sql" })),
         )
         .await;
 
@@ -681,9 +757,10 @@ async fn a_schema_goes_out_as_a_file_and_comes_back_as_a_draft() {
     let exported = generated_file(&app, &created["id"]).await;
 
     let (status, body) = app
-        .post(
+        .authorized(
+            "POST",
             "/v1/schemas/import",
-            json!({ "content": exported["content"], "format": "json" }),
+            Some(json!({ "content": exported["content"], "format": "json" })),
         )
         .await;
 
@@ -703,7 +780,11 @@ async fn a_schema_goes_out_as_a_file_and_comes_back_as_a_draft() {
 
 async fn generated_file(app: &TestApp, schema_id: &Value) -> Value {
     let (status, body) = app
-        .post("/v1/schemas/export", json!({ "schema_id": schema_id }))
+        .authorized(
+            "POST",
+            "/v1/schemas/export",
+            Some(json!({ "schema_id": schema_id })),
+        )
         .await;
 
     assert_eq!(status, StatusCode::OK, "export should succeed: {body}");
@@ -717,9 +798,10 @@ async fn a_ddl_script_is_read_back_into_a_draft() {
 
     let created = created(&app, "from sql").await;
     let (status, body) = app
-        .post(
+        .authorized(
+            "POST",
             "/v1/schemas/generate-ddl",
-            json!({ "schema_id": created["id"], "include_comments": true }),
+            Some(json!({ "schema_id": created["id"], "include_comments": true })),
         )
         .await;
 
@@ -727,9 +809,10 @@ async fn a_ddl_script_is_read_back_into_a_draft() {
 
     let ddl = body["data"]["ddl"].clone();
     let (status, body) = app
-        .post(
+        .authorized(
+            "POST",
             "/v1/schemas/import",
-            json!({ "content": ddl, "format": "sql" }),
+            Some(json!({ "content": ddl, "format": "sql" })),
         )
         .await;
 
@@ -748,7 +831,11 @@ async fn an_import_with_nothing_in_it_is_refused() {
     let app = TestApp::new();
 
     let (status, body) = app
-        .post("/v1/schemas/import", json!({ "content": "   " }))
+        .authorized(
+            "POST",
+            "/v1/schemas/import",
+            Some(json!({ "content": "   " })),
+        )
         .await;
 
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);

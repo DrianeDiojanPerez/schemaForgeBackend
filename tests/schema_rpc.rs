@@ -238,6 +238,52 @@ async fn a_missing_schema_is_a_not_found() {
 }
 
 #[tokio::test]
+async fn a_schema_is_only_seen_by_the_person_who_made_it() {
+    let server = TestServer::start().await;
+    let mut client = server.schema_client().await;
+
+    let created = client
+        .create_schema(create_request("private"))
+        .await
+        .expect("creation should succeed")
+        .into_inner()
+        .schema
+        .expect("a schema should come back");
+
+    let token = server.another_user().await;
+    let mut stranger = server.schema_client_with(&token).await;
+
+    let listed = stranger
+        .list_schemas(v1::ListSchemasRequest {
+            page: 1,
+            per_page: 10,
+        })
+        .await
+        .expect("the listing should succeed")
+        .into_inner();
+
+    assert_eq!(listed.total, 0, "nothing of the other person's is listed");
+
+    let status = stranger
+        .get_schema(v1::GetSchemaRequest {
+            id: created.id.clone(),
+        })
+        .await
+        .expect_err("the fetch should fail");
+
+    assert_eq!(
+        status.code(),
+        Code::NotFound,
+        "a schema someone else owns looks like one that does not exist"
+    );
+
+    stranger
+        .create_schema(create_request("private"))
+        .await
+        .expect("the same name is free for another person");
+}
+
+#[tokio::test]
 async fn a_duplicate_name_is_refused() {
     let server = TestServer::start().await;
     let mut client = server.schema_client().await;
@@ -664,7 +710,7 @@ async fn the_layout_rides_along_unless_the_caller_turns_it_off() {
     assert!(
         silent
             .ddl
-            .contains("-- @schemaforge layout 1\n-- @table \"students\" 40 80"),
+            .contains("-- @table \"students\" 40 80\nCREATE TABLE \"students\""),
         "{}",
         silent.ddl
     );
@@ -675,11 +721,7 @@ async fn the_layout_rides_along_unless_the_caller_turns_it_off() {
         .expect("generation should succeed")
         .into_inner();
 
-    assert!(
-        !without.ddl.contains("@schemaforge layout"),
-        "{}",
-        without.ddl
-    );
+    assert!(!without.ddl.contains("-- @table"), "{}", without.ddl);
 }
 
 #[tokio::test]
