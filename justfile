@@ -103,6 +103,16 @@ docker-test:
 docker-build: network
     docker compose --profile prod build prod
 
+# ──── Fly.io ──────────────────────────────────
+
+# Build the production image on Fly and roll it out.
+deploy:
+    fly deploy --remote-only
+
+# Follow the live log on Fly.
+fly-logs:
+    fly logs
+
 # ──── Migrations (sqlx) ──────────────────────────────────
 #
 # One directory per module under migrations/, so a module can be migrated on

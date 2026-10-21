@@ -34,7 +34,7 @@ pub async fn serve(
     modules: &Modules,
     shutdown: impl std::future::Future<Output = ()>,
 ) -> anyhow::Result<()> {
-    let addr = SocketAddr::from(([0, 0, 0, 0], config.server.grpc_port));
+    let addr = SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 0], config.server.grpc_port));
 
     let mut routes = mount(modules);
 
