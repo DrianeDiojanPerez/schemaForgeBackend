@@ -11,7 +11,10 @@ pub struct LoggerGuard(#[allow(dead_code)] WorkerGuard);
 
 pub fn init(cfg: &LoggerConfig, deployment: &Deployment) -> LoggerGuard {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new(format!("schemaforge_backend={0},tower_http={0}", cfg.level))
+        EnvFilter::new(format!(
+            "schemaforge_backend={0},tower_http={0},sqlx::query={0}",
+            cfg.level
+        ))
     });
 
     let file_appender = tracing_appender::rolling::Builder::new()
