@@ -107,6 +107,8 @@ impl SchemaService for SchemaServiceImpl {
             .await
             .map_err(to_error)?;
 
+        tracing::debug!(total, "schemas listed");
+
         Ok(Data::new(summaries, total, request.page, request.per_page))
     }
 
@@ -114,41 +116,68 @@ impl SchemaService for SchemaServiceImpl {
     async fn create(&self, caller: Uuid, draft: SchemaDraft) -> Result<Schema, Error> {
         Self::check_draft(&draft)?;
 
-        self.repository
+        let schema = self
+            .repository
             .create(caller, draft)
             .await
-            .map_err(to_error)
+            .map_err(to_error)?;
+
+        tracing::info!(schema.id = %schema.id, "schema created");
+
+        Ok(schema)
     }
 
     #[tracing::instrument(name = "SchemaService.FindById", skip_all, fields(schema.id = %id))]
     async fn find_by_id(&self, caller: Uuid, id: &str) -> Result<Schema, Error> {
-        self.repository
+        let schema = self
+            .repository
             .find_by_id(caller, id)
             .await
             .map_err(to_error)?
-            .ok_or_else(|| Error::not_found("schema does not exist"))
+            .ok_or_else(|| Error::not_found("schema does not exist"))?;
+
+        tracing::debug!("schema read");
+
+        Ok(schema)
     }
 
     #[tracing::instrument(name = "SchemaService.Replace", skip_all, fields(schema.id = %id))]
     async fn replace(&self, caller: Uuid, id: &str, draft: SchemaDraft) -> Result<Schema, Error> {
         Self::check_draft(&draft)?;
 
-        self.repository
+        let schema = self
+            .repository
             .replace(caller, id, draft)
             .await
-            .map_err(to_error)
+            .map_err(to_error)?;
+
+        tracing::info!(schema.name = %schema.name, "schema replaced");
+
+        Ok(schema)
     }
 
     #[tracing::instrument(name = "SchemaService.Delete", skip_all, fields(schema.id = %id))]
     async fn delete(&self, caller: Uuid, id: &str) -> Result<(), Error> {
-        self.repository.delete(caller, id).await.map_err(to_error)
+        self.repository.delete(caller, id).await.map_err(to_error)?;
+
+        tracing::info!("schema deleted");
+
+        Ok(())
     }
 
     #[tracing::instrument(name = "SchemaService.Validate", skip_all)]
     async fn validate(&self, caller: Uuid, target: ValidationTarget) -> Result<Report, Error> {
         let schema = self.resolve(caller, target).await?;
+        let report = self.verifier.verify(&schema);
 
-        Ok(self.verifier.verify(&schema))
+        tracing::debug!(
+            schema.id = %schema.id,
+            valid = report.is_valid(),
+            diagnostics = report.diagnostics.len(),
+            "schema validated"
+        );
+
+        Ok(report)
     }
 
     #[tracing::instrument(name = "SchemaService.GenerateDdl", skip_all)]
@@ -166,11 +195,20 @@ impl SchemaService for SchemaServiceImpl {
         // a caller who skipped validation gets the same diagnostics back in
         // place of the script rather than something that looks usable.
         if !report.is_valid() {
+            tracing::debug!(
+                schema.id = %schema.id,
+                dialect = ?request.dialect,
+                diagnostics = report.diagnostics.len(),
+                "ddl withheld, schema invalid"
+            );
+
             return Ok(Generated {
                 ddl: String::new(),
                 report,
             });
         }
+
+        tracing::info!(schema.id = %schema.id, dialect = ?request.dialect, "ddl generated");
 
         Ok(Generated {
             ddl: generator.generate(&schema, request.options),
@@ -184,13 +222,29 @@ impl SchemaService for SchemaServiceImpl {
 
         // Exporting is not generating. A half-drawn diagram is worth saving
         // to a file and coming back to, so nothing is verified here.
-        exchange::export(&schema, request.format, request.include_positions)
+        let exported = exchange::export(&schema, request.format, request.include_positions)?;
+
+        tracing::info!(
+            schema.id = %schema.id,
+            format = ?request.format,
+            file = %exported.file_name,
+            "schema exported"
+        );
+
+        Ok(exported)
     }
 
     #[tracing::instrument(name = "SchemaService.Import", skip_all)]
     async fn import(&self, request: ImportRequest) -> Result<Imported, Error> {
         let (draft, report) =
             exchange::import(&request.content, request.format, request.include_positions)?;
+
+        tracing::info!(
+            format = ?request.format,
+            entities = draft.entities.len(),
+            skipped = report.diagnostics.len(),
+            "schema imported"
+        );
 
         // The draft has no id because nothing was stored. The canvas decides
         // whether this becomes a schema, the same as any other diagram it is
