@@ -7,6 +7,7 @@ pub struct Db {
     pub database: String,
     pub username: String,
     pub password: String,
+    pub ssl_mode: String,
     pub max_connections: u32,
     pub run_migrations: bool,
 }
@@ -15,12 +16,13 @@ impl Db {
     /// Connection string handed to sqlx. The password is only materialised here.
     pub fn to_url(&self) -> String {
         format!(
-            "postgres://{}:{}@{}:{}/{}",
+            "postgres://{}:{}@{}:{}/{}?sslmode={}",
             encode(&self.username),
             encode(&self.password),
             self.host,
             self.port,
-            self.database
+            self.database,
+            self.ssl_mode
         )
     }
 }
@@ -33,6 +35,7 @@ impl std::fmt::Debug for Db {
             .field("database", &self.database)
             .field("username", &self.username)
             .field("password", &MaskedString)
+            .field("ssl_mode", &self.ssl_mode)
             .field("max_connections", &self.max_connections)
             .field("run_migrations", &self.run_migrations)
             .finish()

@@ -267,6 +267,10 @@ just run
 `.env.example` points at `127.0.0.1`, so the host tooling works out of the
 box. Compose overrides `DB_HOST` and `MAIL_HOST` for the containerised app.
 
+`DB_SSL_MODE` defaults to `prefer`, which is what the local container wants. A
+hosted database such as Neon needs `require`. The `prod` compose profile reads
+`.env.production`, which stays out of git.
+
 ## Development
 
 `just` is the task runner. Run `just` on its own for the full list.

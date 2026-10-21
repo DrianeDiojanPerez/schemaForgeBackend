@@ -102,7 +102,7 @@ services:
       context: .
       target: production
     env_file:
-      - .env
+      - .env.production
     ports:
       - "${APP_PORT}:${APP_PORT}"
       - "${GRPC_PORT}:${GRPC_PORT}"

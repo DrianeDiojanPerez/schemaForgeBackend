@@ -81,6 +81,7 @@ impl AppConfig {
             database: env::string_or("DB_DATABASE", "schemaforge"),
             username: env::string_or("DB_USERNAME", "root"),
             password: env::string_or("DB_PASSWORD", "password"),
+            ssl_mode: env::string_or("DB_SSL_MODE", "prefer"),
             max_connections: env::u32_or("DB_MAX_CONNECTIONS", 10)?,
             run_migrations: env::boolean_or("DB_RUN_MIGRATIONS", true)?,
         })
@@ -141,13 +142,14 @@ mod tests {
             database: "schemaforge".to_owned(),
             username: "postgres".to_owned(),
             password: "password".to_owned(),
+            ssl_mode: "prefer".to_owned(),
             max_connections: 10,
             run_migrations: true,
         };
 
         assert_eq!(
             db.to_url(),
-            "postgres://postgres:password@database:5432/schemaforge"
+            "postgres://postgres:password@database:5432/schemaforge?sslmode=prefer"
         );
     }
 
@@ -159,14 +161,31 @@ mod tests {
             database: "schemaforge".to_owned(),
             username: "user@corp".to_owned(),
             password: "p@ss:w/rd?#".to_owned(),
+            ssl_mode: "prefer".to_owned(),
             max_connections: 10,
             run_migrations: true,
         };
 
         assert_eq!(
             db.to_url(),
-            "postgres://user%40corp:p%40ss%3Aw%2Frd%3F%23@database:5432/schemaforge"
+            "postgres://user%40corp:p%40ss%3Aw%2Frd%3F%23@database:5432/schemaforge?sslmode=prefer"
         );
+    }
+
+    #[test]
+    fn a_hosted_database_can_insist_on_tls() {
+        let db = Db {
+            host: "db.example.com".to_owned(),
+            port: 5432,
+            database: "schemaforge".to_owned(),
+            username: "postgres".to_owned(),
+            password: "password".to_owned(),
+            ssl_mode: "require".to_owned(),
+            max_connections: 10,
+            run_migrations: true,
+        };
+
+        assert!(db.to_url().ends_with("/schemaforge?sslmode=require"));
     }
 
     #[test]
@@ -177,6 +196,7 @@ mod tests {
             database: "schemaforge".to_owned(),
             username: "postgres".to_owned(),
             password: "hunter2".to_owned(),
+            ssl_mode: "prefer".to_owned(),
             max_connections: 10,
             run_migrations: true,
         };

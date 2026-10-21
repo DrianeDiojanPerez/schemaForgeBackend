@@ -4,7 +4,7 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 bruno_dir := "api/bruno/API"
 
 # The DB_* variables come from .env and are expanded by the shell, not by just.
-database_url := '"postgres://$DB_USERNAME:$DB_PASSWORD@$DB_HOST:$DB_PORT/$DB_DATABASE"'
+database_url := '"postgres://$DB_USERNAME:$DB_PASSWORD@$DB_HOST:$DB_PORT/$DB_DATABASE?sslmode=${DB_SSL_MODE:-prefer}"'
 sqlx := "DATABASE_URL=" + database_url + " cargo sqlx"
 
 # List every recipe.
