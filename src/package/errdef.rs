@@ -203,9 +203,23 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+impl Error {
+    /// A server fault is logged as an error, anything the caller got wrong
+    /// as info, so the error log holds only what needs fixing.
+    fn log(&self) {
+        let status = status_for(self.app_code());
+
+        if status.is_server_error() {
+            tracing::error!(status = status.as_u16(), error = %self, "Error Handler Catch");
+        } else {
+            tracing::info!(status = status.as_u16(), error = %self, "Error Handler Catch");
+        }
+    }
+}
+
 impl From<Error> for Status {
     fn from(error: Error) -> Self {
-        tracing::info!(error = %error, "Error Handler Catch");
+        error.log();
 
         let app_code = error.app_code();
 
@@ -244,7 +258,7 @@ impl From<sqlx::Error> for Error {
 
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
-        tracing::info!(error = %self, "Error Handler Catch");
+        self.log();
 
         let (status, body) = match self {
             Error::Validation(err) => (
