@@ -21,5 +21,13 @@ pub enum DomainError {
     #[error("invalid department id")]
     DepartmentNotFoundConstraint,
     #[error(transparent)]
-    Database(#[from] sqlx::Error),
+    Database(sqlx::Error),
+}
+
+impl From<sqlx::Error> for DomainError {
+    fn from(err: sqlx::Error) -> Self {
+        tracing::warn!(error = %err, "query failed");
+
+        DomainError::Database(err)
+    }
 }

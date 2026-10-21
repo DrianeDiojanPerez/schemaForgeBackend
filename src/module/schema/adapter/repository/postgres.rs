@@ -269,6 +269,8 @@ impl PgSchemaRepository {
     /// The cause is only ever logged, so the database's own wording is kept
     /// rather than flattened into something the caller would see anyway.
     fn storage(err: sqlx::Error) -> DomainError {
+        tracing::warn!(error = %err, "query failed");
+
         DomainError::Storage(err.to_string())
     }
 
