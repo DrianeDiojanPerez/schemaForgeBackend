@@ -454,6 +454,8 @@ same levels:
 | `request rejected`| warn  | a 4xx status and the latency              |
 | `request failed`  | error | a 5xx status and the latency              |
 | `rpc started`     | debug | the call metadata                         |
+| `rpc request`     | debug | the request message as JSON, credentials blanked |
+| `rpc response`    | debug | the response message as JSON              |
 | `rpc completed`   | debug | latency                                   |
 | `rpc rejected`    | warn  | a client `grpc-status` and the latency    |
 | `rpc failed`      | error | `grpc-status` 2, 13, 14 or 15             |

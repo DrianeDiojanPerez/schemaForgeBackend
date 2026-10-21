@@ -9,6 +9,7 @@ use crate::config::{AppConfig, Deployment};
 use crate::module::{auth, health, schema};
 use crate::rpc::v1;
 use crate::server::middlewares::rpc_auth::AuthLayer;
+use crate::server::middlewares::rpc_body::BodyDumpLayer;
 use crate::server::middlewares::rpc_context::RequestContextLayer;
 use crate::server::Modules;
 
@@ -57,6 +58,7 @@ pub async fn serve(
             header::AUTHORIZATION,
         ]))
         .layer(RequestContextLayer)
+        .layer(BodyDumpLayer::new(v1::FILE_DESCRIPTOR_SET)?)
         .layer(AuthLayer::new(modules.auth.clone(), modules.rbac.clone()))
         .add_routes(routes)
         .serve_with_shutdown(addr, shutdown)
