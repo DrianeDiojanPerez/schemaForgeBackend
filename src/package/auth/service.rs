@@ -238,22 +238,25 @@ impl Auth for AuthService {
         email: &str,
         password: &str,
     ) -> Result<AuthenticationTokens, Error> {
-        tracing::debug!(email, "Searching for user with email");
-
-        let user = self
+        let Some(user) = self
             .store
             .find_user_by_email(email)
             .await
             .map_err(Error::unknown)?
-            .ok_or_else(|| Error::unauthorized(INVALID_CREDENTIALS))?;
+        else {
+            tracing::warn!(email, "sign in failed, unknown email");
+            return Err(Error::unauthorized(INVALID_CREDENTIALS));
+        };
 
         // An account made by a Google sign in has no password to match.
         if user.password.is_empty()
             || crypto::compare_hash_and_password(&user.password, password).is_err()
         {
-            tracing::debug!("Password Comparison Failed");
+            tracing::warn!(user_id = %user.id, "sign in failed, wrong password");
             return Err(Error::unauthorized(INVALID_CREDENTIALS));
         }
+
+        tracing::info!(user_id = %user.id, "signed in");
 
         self.generate_tokens(&user)
     }
@@ -297,12 +300,16 @@ impl Auth for AuthService {
 
         let user = self.require_user_by_id(user_id).await?;
 
+        tracing::info!(%user_id, "signed up");
+
         self.generate_tokens(&user)
     }
 
     async fn refresh_token(&self, refresh_token: &str) -> Result<AuthenticationTokens, Error> {
         let user_id = self.user_id_from(refresh_token)?;
         let user = self.require_user_by_id(user_id).await?;
+
+        tracing::info!(%user_id, "tokens refreshed");
 
         self.generate_tokens(&user)
     }
@@ -315,6 +322,7 @@ impl Auth for AuthService {
         let account = self.google.account_for(code).await?;
 
         if !account.email_verified {
+            tracing::warn!("google sign in refused, email unverified");
             return Err(Error::unauthorized(UNVERIFIED_GOOGLE_EMAIL));
         }
 
@@ -332,6 +340,8 @@ impl Auth for AuthService {
             }
             None => self.create_google_user(&email, &account).await?,
         };
+
+        tracing::info!(user_id = %user.id, "signed in with google");
 
         self.generate_tokens(&user)
     }
@@ -374,6 +384,8 @@ impl Auth for AuthService {
             .await
             .map_err(Error::unknown)?;
 
+        tracing::info!(user_id = %user.id, "password reset requested");
+
         Ok(())
     }
 
@@ -400,6 +412,8 @@ impl Auth for AuthService {
             .delete_password_reset(&password_reset.email)
             .await
             .map_err(Error::unknown)?;
+
+        tracing::info!(email = %password_reset.email, "password reset");
 
         Ok(())
     }

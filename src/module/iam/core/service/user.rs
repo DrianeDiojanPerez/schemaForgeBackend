@@ -48,13 +48,13 @@ impl UserServiceImpl {
 #[async_trait]
 impl UserService for UserServiceImpl {
     async fn index(&self, request: ListRequest) -> Result<Data<User>, Error> {
-        tracing::debug!(?request, "Fetching User List");
-
         let (data, total_records) = self
             .repository
             .index(&request)
             .await
             .map_err(Self::map_domain_error)?;
+
+        tracing::debug!(total = total_records, "users listed");
 
         Ok(Data::new(
             data,
@@ -71,8 +71,6 @@ impl UserService for UserServiceImpl {
             ..new_user
         };
 
-        tracing::debug!(user_name = %interim_user.user_name, "Creating a New User");
-
         let mut tx = self.trm.begin().await.map_err(Error::unknown)?;
 
         let user_id = self
@@ -82,6 +80,8 @@ impl UserService for UserServiceImpl {
             .map_err(Self::map_domain_error)?;
 
         tx.commit().await.map_err(Error::unknown)?;
+
+        tracing::info!(%user_id, user_name = %interim_user.user_name, "user created");
 
         Ok(user_id)
     }
@@ -126,6 +126,8 @@ impl UserService for UserServiceImpl {
 
         tx.commit().await.map_err(Error::unknown)?;
 
+        tracing::info!(%user_id, "user updated");
+
         Ok(())
     }
 
@@ -140,6 +142,8 @@ impl UserService for UserServiceImpl {
             .map_err(Self::map_domain_error)?;
 
         tx.commit().await.map_err(Error::unknown)?;
+
+        tracing::info!(%user_id, "user deleted");
 
         Ok(())
     }

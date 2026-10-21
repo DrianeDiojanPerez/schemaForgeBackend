@@ -19,9 +19,11 @@ impl PermissionServiceImpl {
 #[async_trait]
 impl PermissionService for PermissionServiceImpl {
     async fn list_all(&self) -> Result<Vec<Permission>, Error> {
-        tracing::debug!("Retrieving all Permissions");
+        let permissions = self.repository.list_all().await.map_err(Error::unknown)?;
 
-        self.repository.list_all().await.map_err(Error::unknown)
+        tracing::debug!(total = permissions.len(), "permissions listed");
+
+        Ok(permissions)
     }
 }
 
