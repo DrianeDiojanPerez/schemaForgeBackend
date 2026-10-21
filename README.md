@@ -449,25 +449,35 @@ same levels:
 
 | Line              | Level | Carries                                   |
 | ----------------- | ----- | ----------------------------------------- |
-| `request started` | debug | method, uri, query, request headers       |
-| `request completed`| debug| status, latency, response headers         |
+| `request started` | info  | method, uri, query                        |
+| `request headers` | debug | the request headers                       |
+| `request completed`| info | status, latency                           |
+| `response headers`| debug | the response headers                      |
 | `request rejected`| warn  | a 4xx status and the latency              |
 | `request failed`  | error | a 5xx status and the latency              |
-| `rpc started`     | debug | the call metadata                         |
+| `rpc started`     | info  |                                           |
+| `rpc metadata`    | debug | the call metadata                         |
 | `rpc request`     | debug | the request message as JSON, credentials blanked |
 | `rpc response`    | debug | the response message as JSON              |
-| `rpc completed`   | debug | latency                                   |
+| `rpc completed`   | info  | latency                                   |
 | `rpc rejected`    | warn  | a client `grpc-status` and the latency    |
 | `rpc failed`      | error | `grpc-status` 2, 13, 14 or 15             |
 
 `Authorization` is marked sensitive on both ports, so it prints as `Sensitive`
 rather than as the token.
 
+Below the transport, every service writes one line per action in the past
+tense: `schema created`, `signed in`, `user deleted`. Writes are `info`,
+reads such as `schemas listed` are `debug`, and a refused sign in is `warn`.
+At `debug` sqlx adds a line per statement with its elapsed time. A statement
+that fails is a `warn` with the database's own wording, and one that takes
+over a second is a `warn` too, at any level.
+
 `LOGGER_LEVEL` takes one of `trace|debug|info|warn|error` and defaults to
-`info`; `.env.example` ships `debug` so the request lines are visible while
-the frontend is being written. At `info` only the rejections and failures
-survive. `RUST_LOG` overrides it when set, and accepts the full tracing filter
-syntax.
+`info`, which shows every request, every service action and every failure.
+`.env.example` ships `debug`, which adds the headers, the message bodies and
+the statements while the frontend is being written. `RUST_LOG` overrides it
+when set, and accepts the full tracing filter syntax.
 
 `APP_ENVIRONMENT` takes one of `local|development|production` and defaults to
 `development`; only `production` turns the stdout logger off. Both variables

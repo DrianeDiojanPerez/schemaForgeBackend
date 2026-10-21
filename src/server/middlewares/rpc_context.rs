@@ -77,7 +77,8 @@ where
 
         Box::pin(
             async move {
-                tracing::debug!(metadata = ?request.headers(), "rpc started");
+                tracing::info!("rpc started");
+                tracing::debug!(metadata = ?request.headers(), "rpc metadata");
 
                 let started = Instant::now();
                 let mut response = inner.call(request).await?;
@@ -99,7 +100,7 @@ where
                     Some(code) if code != 0 => {
                         tracing::warn!(grpc_status = code, latency_ms, "rpc rejected");
                     }
-                    _ => tracing::debug!(latency_ms, "rpc completed"),
+                    _ => tracing::info!(latency_ms, "rpc completed"),
                 }
 
                 if let Ok(value) = HeaderValue::from_str(&request_id) {
