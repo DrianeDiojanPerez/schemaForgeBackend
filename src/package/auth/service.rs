@@ -8,6 +8,8 @@ use uuid::Uuid;
 use validator::ValidateEmail;
 
 use crate::database::pg_error;
+use crate::module::schema::core::ports::SchemaService;
+use crate::module::schema::core::sample::sample_schema;
 use crate::package::auth::{Auth, GoogleAccount, GoogleIdentity, Store};
 use crate::package::auth::{AuthenticationTokens, Identity, NewUser, Registration};
 use crate::package::crypto;
@@ -53,6 +55,7 @@ pub struct AuthService {
     store: Arc<dyn Store>,
     mailer: Arc<dyn Emailer>,
     google: Arc<dyn GoogleIdentity>,
+    schemas: Arc<dyn SchemaService>,
     token_ttl: i64,
     refresh_token_ttl: i64,
 }
@@ -63,6 +66,7 @@ impl AuthService {
         store: Arc<dyn Store>,
         mailer: Arc<dyn Emailer>,
         google: Arc<dyn GoogleIdentity>,
+        schemas: Arc<dyn SchemaService>,
         token_ttl: i64,
         refresh_token_ttl: i64,
     ) -> Self {
@@ -71,9 +75,21 @@ impl AuthService {
             store,
             mailer,
             google,
+            schemas,
             token_ttl,
             refresh_token_ttl,
         }
+    }
+
+    /// A new account gets the sample through the same path a user's own
+    /// draft takes, so it is checked like one. Only creation seeds: a sample
+    /// the user deleted stays deleted.
+    async fn seed(&self, user_id: Uuid) -> Result<(), Error> {
+        self.schemas.create(user_id, sample_schema()).await?;
+
+        tracing::info!(%user_id, "sample schema seeded");
+
+        Ok(())
     }
 
     fn generate_tokens(&self, user: &Identity) -> Result<AuthenticationTokens, Error> {
@@ -177,7 +193,10 @@ impl AuthService {
             .await;
 
         match created {
-            Ok(user_id) => self.require_user_by_id(user_id).await,
+            Ok(user_id) => {
+                self.seed(user_id).await?;
+                self.require_user_by_id(user_id).await
+            }
             Err(err) if pg_error::is(&err, pg_error::UNIQUE_VIOLATION) => {
                 let user = self
                     .store
@@ -297,6 +316,8 @@ impl Auth for AuthService {
             })
             .await
             .map_err(creation_error)?;
+
+        self.seed(user_id).await?;
 
         let user = self.require_user_by_id(user_id).await?;
 
@@ -428,11 +449,16 @@ mod tests {
 
     use async_trait::async_trait;
 
+    use crate::module::schema::core::domain::{DomainError, Schema, SchemaDraft, SchemaSummary};
+    use crate::module::schema::core::ports::SchemaRepository;
+    use crate::module::schema::core::sample::SAMPLE_SCHEMA_NAME;
+    use crate::module::schema::Services;
     use crate::package::auth::{GoogleAccount, PasswordReset};
     use crate::package::emailer::EmailerError;
     use crate::package::errdef::code;
     use crate::package::jwt::HmacTokenGenerator;
     use crate::package::masked::MaskedBytes;
+    use crate::package::pagination::ListRequest;
 
     const PASSWORD: &str = "Sup3r$ecret";
 
@@ -632,6 +658,83 @@ mod tests {
         }
     }
 
+    /// Holds each owner's schemas so a test can see what sign up left behind.
+    #[derive(Default)]
+    struct FakeSchemas {
+        schemas: Mutex<Vec<(Uuid, Schema)>>,
+    }
+
+    impl FakeSchemas {
+        fn owned_by(&self, owner: Uuid) -> Vec<SchemaSummary> {
+            self.schemas
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(by, _)| *by == owner)
+                .map(|(_, schema)| schema.summary())
+                .collect()
+        }
+    }
+
+    #[async_trait]
+    impl SchemaRepository for FakeSchemas {
+        async fn index(
+            &self,
+            owner: Uuid,
+            _request: &ListRequest,
+        ) -> Result<(Vec<SchemaSummary>, i64), DomainError> {
+            let mine = self.owned_by(owner);
+            let total = mine.len() as i64;
+
+            Ok((mine, total))
+        }
+
+        async fn create(&self, owner: Uuid, draft: SchemaDraft) -> Result<Schema, DomainError> {
+            let mut schemas = self.schemas.lock().unwrap();
+            let schema = Schema::new(format!("s-{}", schemas.len() + 1), draft, Utc::now());
+            schemas.push((owner, schema.clone()));
+
+            Ok(schema)
+        }
+
+        async fn find_by_id(&self, owner: Uuid, id: &str) -> Result<Option<Schema>, DomainError> {
+            Ok(self
+                .schemas
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(by, schema)| *by == owner && schema.id == id)
+                .map(|(_, schema)| schema.clone()))
+        }
+
+        async fn find_by_name(
+            &self,
+            owner: Uuid,
+            name: &str,
+        ) -> Result<Option<Schema>, DomainError> {
+            Ok(self
+                .schemas
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(by, schema)| *by == owner && schema.name == name)
+                .map(|(_, schema)| schema.clone()))
+        }
+
+        async fn replace(
+            &self,
+            _owner: Uuid,
+            _id: &str,
+            _draft: SchemaDraft,
+        ) -> Result<Schema, DomainError> {
+            unimplemented!("sign up never replaces a schema")
+        }
+
+        async fn delete(&self, _owner: Uuid, _id: &str) -> Result<(), DomainError> {
+            unimplemented!("sign up never deletes a schema")
+        }
+    }
+
     fn a_user() -> Identity {
         Identity {
             id: Uuid::new_v4(),
@@ -657,13 +760,88 @@ mod tests {
         mailer: Arc<FakeMailer>,
         google: Arc<FakeGoogle>,
     ) -> (AuthService, Arc<dyn TokenGenerator>) {
+        service_with_schemas(store, mailer, google, Arc::new(FakeSchemas::default()))
+    }
+
+    fn service_with_schemas(
+        store: Arc<FakeStore>,
+        mailer: Arc<FakeMailer>,
+        google: Arc<FakeGoogle>,
+        schemas: Arc<FakeSchemas>,
+    ) -> (AuthService, Arc<dyn TokenGenerator>) {
         let jwt: Arc<dyn TokenGenerator> =
             Arc::new(HmacTokenGenerator::new(&MaskedBytes::new("secret")));
+        let schema = Services::with_repository(schemas).schema;
 
         (
-            AuthService::new(jwt.clone(), store, mailer, google, 3600, 604_800),
+            AuthService::new(jwt.clone(), store, mailer, google, schema, 3600, 604_800),
             jwt,
         )
+    }
+
+    fn assert_only_the_sample(schemas: &FakeSchemas, owner: Uuid) {
+        let mine = schemas.owned_by(owner);
+
+        assert_eq!(mine.len(), 1, "exactly one schema is seeded");
+        assert_eq!(mine[0].name, SAMPLE_SCHEMA_NAME);
+        assert_eq!(mine[0].entity_count, 3);
+        assert_eq!(mine[0].relationship_count, 3);
+    }
+
+    #[tokio::test]
+    async fn signing_up_with_a_password_seeds_the_sample() {
+        let store = Arc::new(FakeStore::default());
+        let schemas = Arc::new(FakeSchemas::default());
+        let (service, _) = service_with_schemas(
+            store.clone(),
+            Arc::new(FakeMailer::default()),
+            Arc::new(FakeGoogle::default()),
+            schemas.clone(),
+        );
+
+        service
+            .register(Registration {
+                name: "Sam Stranger".to_owned(),
+                email: "sam@example.com".to_owned(),
+                password: PASSWORD.to_owned(),
+            })
+            .await
+            .expect("the sign up should succeed");
+
+        let created = store.created.lock().unwrap();
+        let user = created.first().expect("the user should be stored");
+
+        assert_only_the_sample(&schemas, user.id);
+    }
+
+    #[tokio::test]
+    async fn the_first_google_sign_in_seeds_the_sample_and_the_second_adds_nothing() {
+        let store = Arc::new(FakeStore::default());
+        let schemas = Arc::new(FakeSchemas::default());
+        let google = Arc::new(FakeGoogle::answering_as(
+            "sam@example.com",
+            true,
+            "Sam Stranger",
+            None,
+        ));
+        let (service, _) = service_with_schemas(
+            store.clone(),
+            Arc::new(FakeMailer::default()),
+            google,
+            schemas.clone(),
+        );
+
+        for _ in 0..2 {
+            service
+                .login_with_google("a-code")
+                .await
+                .expect("the sign in should succeed");
+        }
+
+        let created = store.created.lock().unwrap();
+        assert_eq!(created.len(), 1, "the second sign in reuses the account");
+
+        assert_only_the_sample(&schemas, created[0].id);
     }
 
     fn code_of(err: &Error) -> i32 {

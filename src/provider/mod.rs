@@ -42,11 +42,14 @@ impl Provider {
             redirect_uri: config.google.redirect_uri.clone(),
         }));
 
+        let schema = schema::Services::new(database.clone());
+
         let auth: Arc<dyn Auth> = Arc::new(AuthService::new(
             jwt.clone(),
             Arc::new(PostgresAuthStore::new(database.clone())),
             mailer.clone(),
             google,
+            schema.schema.clone(),
             config.auth.access_token_ttl_in_seconds,
             config.auth.refresh_token_ttl_in_seconds,
         ));
@@ -57,7 +60,6 @@ impl Provider {
         ));
 
         let iam = iam::Services::new(database.clone(), tx.clone());
-        let schema = schema::Services::new(database.clone());
 
         Ok(Self {
             config: Arc::new(config),
