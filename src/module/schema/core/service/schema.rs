@@ -268,6 +268,7 @@ mod tests {
         diagnostic_code, Attribute, DataType, DataTypeKind, Diagnostic, Entity, ExchangeFormat,
     };
     use crate::module::schema::core::ports::GenerateOptions;
+    use crate::module::schema::core::sample;
     use crate::module::schema::core::service::{PostgresGenerator, SchemaVerifier};
     use crate::package::errdef::code;
 
@@ -627,6 +628,43 @@ mod tests {
                 .app_code(),
             code::NOT_FOUND
         );
+    }
+
+    #[tokio::test]
+    async fn the_sample_passes_the_draft_check() {
+        let service = service(FakeRepository::default());
+
+        let schema = service
+            .create(caller(), sample::sample_schema())
+            .await
+            .expect("the sample should pass the draft check");
+
+        assert_eq!(schema.name, sample::SAMPLE_SCHEMA_NAME);
+        assert_eq!(schema.entities.len(), 3);
+        assert_eq!(schema.relationships.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn deleting_the_sample_leaves_nothing_behind() {
+        let service = service(FakeRepository::default());
+
+        let schema = service
+            .create(caller(), sample::sample_schema())
+            .await
+            .expect("the sample should be created");
+
+        service
+            .delete(caller(), &schema.id)
+            .await
+            .expect("the sample should be deleted");
+
+        let page = service
+            .index(caller(), ListRequest::default())
+            .await
+            .expect("the listing should succeed");
+
+        assert_eq!(page.meta.total_count, 0);
+        assert!(page.data.is_empty());
     }
 
     #[tokio::test]
