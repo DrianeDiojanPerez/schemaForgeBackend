@@ -83,12 +83,7 @@ pub(crate) fn case_study(
 }
 
 pub(crate) fn draft_of(schema: &Schema) -> SchemaDraft {
-    SchemaDraft {
-        name: schema.name.clone(),
-        description: schema.description.clone(),
-        entities: schema.entities.clone(),
-        relationships: schema.relationships.clone(),
-    }
+    schema.draft()
 }
 
 /// The academic case study from the proposal: one table owning a key, one

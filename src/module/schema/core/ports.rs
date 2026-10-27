@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use uuid::Uuid;
 
 use crate::module::schema::core::domain::{
-    Dialect, DomainError, ExchangeFormat, Report, Schema, SchemaDraft, SchemaSummary,
+    Comparison, Dialect, DomainError, ExchangeFormat, Report, Schema, SchemaDraft, SchemaSummary,
 };
 use crate::package::errdef::Error;
 use crate::package::pagination::{Data, ListRequest};
@@ -82,6 +82,10 @@ pub trait SchemaService: Send + Sync {
     /// Reads a file back into a draft. Nothing is stored: the canvas saves
     /// what comes back through the rpcs it already uses.
     async fn import(&self, request: ImportRequest) -> Result<Imported, Error>;
+
+    /// Measures one schema against another, which is how a case study says
+    /// what a round trip through SQL actually kept.
+    async fn compare(&self, caller: Uuid, request: CompareRequest) -> Result<Comparison, Error>;
 }
 
 #[derive(Debug, Clone)]
@@ -115,6 +119,15 @@ pub struct Exported {
 pub struct ImportRequest {
     pub content: String,
     pub format: ExchangeFormat,
+    pub include_positions: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompareRequest {
+    /// The schema as it was drawn.
+    pub expected: ValidationTarget,
+    /// What to hold against it, usually what came back from a round trip.
+    pub actual: ValidationTarget,
     pub include_positions: bool,
 }
 

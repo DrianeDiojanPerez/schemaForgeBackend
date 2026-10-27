@@ -136,6 +136,8 @@ mod tests {
             "/v1/permissions",
             "/v1/schemas",
             "/v1/schemas/validate",
+            "/v1/schemas/compare",
+            "/v1/schemas/compare-sql",
             "/v1/schemas/generate-ddl",
             "/v1/schemas/export",
             "/v1/schemas/import",

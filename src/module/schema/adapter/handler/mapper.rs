@@ -286,6 +286,62 @@ impl From<domain::Diagnostic> for Diagnostic {
     }
 }
 
+#[derive(Debug, Serialize)]
+pub struct ComparisonCounts {
+    pub category: String,
+    pub matched: u32,
+    pub missing: u32,
+    pub extra: u32,
+    pub changed: u32,
+    pub precision: f64,
+    pub recall: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SchemaDifference {
+    pub kind: String,
+    pub path: String,
+    pub expected: String,
+    pub actual: String,
+}
+
+/// Every category is reported, including the ones with nothing in them, so
+/// a reader can see that the keys were looked at and found whole rather
+/// than wonder whether they were looked at.
+pub fn comparison_to(
+    comparison: domain::Comparison,
+) -> (Vec<ComparisonCounts>, Vec<SchemaDifference>) {
+    let counts = domain::Category::VARIANTS
+        .iter()
+        .map(|category| {
+            let counts = comparison.counts(*category);
+
+            ComparisonCounts {
+                category: category.to_string(),
+                matched: counts.matched,
+                missing: counts.missing,
+                extra: counts.extra,
+                changed: counts.changed,
+                precision: counts.precision(),
+                recall: counts.recall(),
+            }
+        })
+        .collect();
+
+    let differences = comparison
+        .differences
+        .into_iter()
+        .map(|difference| SchemaDifference {
+            kind: difference.kind.to_string(),
+            path: difference.path,
+            expected: difference.expected,
+            actual: difference.actual,
+        })
+        .collect();
+
+    (counts, differences)
+}
+
 pub fn report_to(report: domain::Report) -> Vec<Diagnostic> {
     report
         .diagnostics

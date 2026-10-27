@@ -5,11 +5,11 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use crate::module::schema::core::domain::{
-    Dialect, DomainError, Report, Schema, SchemaDraft, SchemaSummary,
+    Comparison, Dialect, DomainError, Report, Schema, SchemaDraft, SchemaSummary,
 };
 use crate::module::schema::core::ports::{
-    ExportRequest, Exported, GenerateRequest, Generated, Generator, ImportRequest, Imported,
-    SchemaRepository, SchemaService, ValidationTarget, Verifier,
+    CompareRequest, ExportRequest, Exported, GenerateRequest, Generated, Generator, ImportRequest,
+    Imported, SchemaRepository, SchemaService, ValidationTarget, Verifier,
 };
 use crate::package::errdef::Error;
 use crate::package::pagination::{Data, ListRequest};
@@ -253,6 +253,31 @@ impl SchemaService for SchemaServiceImpl {
             draft: Schema::new(String::new(), draft, Utc::now()),
             report,
         })
+    }
+
+    #[tracing::instrument(name = "SchemaService.Compare", skip_all)]
+    async fn compare(&self, caller: Uuid, request: CompareRequest) -> Result<Comparison, Error> {
+        let expected = self.resolve(caller, request.expected).await?;
+        let actual = self.resolve(caller, request.actual).await?;
+
+        // Nothing is verified. A comparison is a measurement, and measuring
+        // a broken schema against a reference is exactly what a case study
+        // does when it wants to know how broken.
+        let comparison = exchange::compare(
+            &expected.draft(),
+            &actual.draft(),
+            request.include_positions,
+        );
+
+        tracing::info!(
+            expected = %expected.name,
+            actual = %actual.name,
+            equal = comparison.is_equal(),
+            differences = comparison.differences.len(),
+            "schemas compared"
+        );
+
+        Ok(comparison)
     }
 }
 

@@ -5,7 +5,8 @@ use uuid::Uuid;
 
 use crate::module::schema::adapter::rpc::mapper;
 use crate::module::schema::core::ports::{
-    ExportRequest, GenerateOptions, GenerateRequest, ImportRequest, SchemaService, ValidationTarget,
+    CompareRequest, ExportRequest, GenerateOptions, GenerateRequest, ImportRequest, SchemaService,
+    ValidationTarget,
 };
 use crate::package::auth::AuthUser;
 use crate::package::errdef::Error;
@@ -63,6 +64,34 @@ impl SchemaHandler {
         match target {
             Some(v1::generate_ddl_request::Target::Id(id)) => Self::target_of(Some(id), None),
             Some(v1::generate_ddl_request::Target::Draft(draft)) => {
+                Self::target_of(None, Some(draft))
+            }
+            None => Self::target_of(None, None),
+        }
+    }
+
+    fn expected_target_from(
+        target: Option<v1::compare_schemas_request::Expected>,
+    ) -> Result<ValidationTarget, Error> {
+        match target {
+            Some(v1::compare_schemas_request::Expected::ExpectedId(id)) => {
+                Self::target_of(Some(id), None)
+            }
+            Some(v1::compare_schemas_request::Expected::ExpectedDraft(draft)) => {
+                Self::target_of(None, Some(draft))
+            }
+            None => Self::target_of(None, None),
+        }
+    }
+
+    fn actual_target_from(
+        target: Option<v1::compare_schemas_request::Actual>,
+    ) -> Result<ValidationTarget, Error> {
+        match target {
+            Some(v1::compare_schemas_request::Actual::ActualId(id)) => {
+                Self::target_of(Some(id), None)
+            }
+            Some(v1::compare_schemas_request::Actual::ActualDraft(draft)) => {
                 Self::target_of(None, Some(draft))
             }
             None => Self::target_of(None, None),
@@ -252,6 +281,36 @@ impl v1::schema_service_server::SchemaService for SchemaHandler {
         }))
     }
 
+    #[tracing::instrument(name = "SchemaService.CompareSchemas", skip_all)]
+    async fn compare_schemas(
+        &self,
+        request: Request<v1::CompareSchemasRequest>,
+    ) -> Result<Response<v1::CompareSchemasResponse>, Status> {
+        let caller = Self::caller(&request)?;
+        let request = request.into_inner();
+
+        let comparison = self
+            .service
+            .compare(
+                caller,
+                CompareRequest {
+                    expected: Self::expected_target_from(request.expected)?,
+                    actual: Self::actual_target_from(request.actual)?,
+                    include_positions: request.include_positions.unwrap_or(true),
+                },
+            )
+            .await?;
+
+        let equal = comparison.is_equal();
+        let (counts, differences) = mapper::comparison_to(comparison);
+
+        Ok(Response::new(v1::CompareSchemasResponse {
+            equal,
+            counts,
+            differences,
+        }))
+    }
+
     #[tracing::instrument(name = "SchemaService.ImportSchema", skip_all)]
     async fn import_schema(
         &self,
@@ -284,7 +343,9 @@ mod tests {
     use async_trait::async_trait;
     use tonic::Code;
 
-    use crate::module::schema::core::domain::{Report, Schema, SchemaDraft, SchemaSummary};
+    use crate::module::schema::core::domain::{
+        Comparison, Report, Schema, SchemaDraft, SchemaSummary,
+    };
     use crate::module::schema::core::ports::{Exported, Generated, Imported};
     use crate::package::auth::Identity;
     use crate::package::pagination::{Data, DEFAULT_PER_PAGE};
@@ -412,6 +473,18 @@ mod tests {
                 draft: self.schema(),
                 report: Report::default(),
             })
+        }
+
+        async fn compare(
+            &self,
+            _caller: Uuid,
+            _request: CompareRequest,
+        ) -> Result<Comparison, Error> {
+            if let Some(failure) = self.fail_with {
+                return Err(failure());
+            }
+
+            Ok(Comparison::default())
         }
     }
 
