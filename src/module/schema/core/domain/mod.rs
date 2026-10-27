@@ -1,4 +1,5 @@
 mod attribute;
+mod comparison;
 mod data_type;
 mod diagnostic;
 mod dialect;
@@ -8,6 +9,7 @@ mod relationship;
 mod schema;
 
 pub use attribute::{Attribute, ForeignKeyRef};
+pub use comparison::{Category, Comparison, Counts, Difference, DifferenceKind};
 pub use data_type::{DataType, DataTypeKind, TypeFamily};
 pub use diagnostic::{code as diagnostic_code, Diagnostic, Report, Severity};
 pub use dialect::Dialect;
