@@ -1,8 +1,10 @@
+mod compare;
 mod json;
 mod names;
 mod read;
 mod sql;
 
+pub use compare::compare;
 pub(crate) use names::{cardinality_name, kind_name};
 
 #[cfg(test)]
