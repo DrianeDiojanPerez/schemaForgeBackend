@@ -13,6 +13,7 @@ fn primary_key(id: &str, name: &str) -> Value {
         "data_type": { "kind": "uuid" },
         "nullable": false,
         "primary_key": true,
+        "unique": true,
     })
 }
 
@@ -57,10 +58,10 @@ fn course_registration() -> (Vec<Value>, Vec<Value>) {
         "id": "r1",
         "name": "enrolls",
         "description": "A student holds many enrollments",
-        "from_entity_id": "e2",
-        "from_attribute_id": "a4",
-        "to_entity_id": "e1",
-        "to_attribute_id": "a1",
+        "from_entity_id": "e1",
+        "from_attribute_id": "a1",
+        "to_entity_id": "e2",
+        "to_attribute_id": "a4",
         "cardinality": "1:N",
     });
 
@@ -839,5 +840,163 @@ async fn an_import_with_nothing_in_it_is_refused() {
         .await;
 
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(body["error"]["errors"].get("content").is_some(), "{body}");
+}
+
+/// The tally for one category, looked up by name so a test can say which
+/// part of the schema it is talking about.
+fn counts<'a>(body: &'a Value, category: &str) -> &'a Value {
+    body["data"]["counts"]
+        .as_array()
+        .expect("the counts should come back")
+        .iter()
+        .find(|counts| counts["category"] == category)
+        .unwrap_or_else(|| panic!("{category} should be one of the categories"))
+}
+
+#[tokio::test]
+async fn a_schema_measured_against_itself_matches_everywhere() {
+    let app = TestApp::new();
+
+    let created = created(&app, "course registration").await;
+
+    let (status, body) = app
+        .authorized(
+            "POST",
+            "/v1/schemas/compare",
+            Some(json!({
+                "expected_schema_id": created["id"],
+                "actual_schema_id": created["id"],
+            })),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["equal"], true, "{body}");
+    assert_eq!(
+        body["data"]["differences"].as_array().map(Vec::len),
+        Some(0)
+    );
+
+    assert_eq!(counts(&body, "tables")["matched"], 2);
+    assert_eq!(counts(&body, "columns")["matched"], 4);
+    assert_eq!(counts(&body, "relationships")["matched"], 1);
+    assert_eq!(counts(&body, "tables")["recall"], 1.0);
+    assert_eq!(counts(&body, "tables")["precision"], 1.0);
+}
+
+#[tokio::test]
+async fn a_column_that_did_not_come_back_is_counted_and_named() {
+    let app = TestApp::new();
+
+    let created = created(&app, "course registration").await;
+    let (mut entities, relationships) = course_registration();
+
+    entities[0]["attributes"]
+        .as_array_mut()
+        .expect("students has columns")
+        .pop();
+
+    let (status, body) = app
+        .authorized(
+            "POST",
+            "/v1/schemas/compare",
+            Some(json!({
+                "expected_schema_id": created["id"],
+                "actual_schema": {
+                    "name": "course registration",
+                    "description": "A course registration schema",
+                    "entities": entities,
+                    "relationships": relationships,
+                },
+            })),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["equal"], false, "{body}");
+
+    assert_eq!(counts(&body, "columns")["missing"], 1);
+    assert_eq!(counts(&body, "columns")["matched"], 3);
+    assert_eq!(counts(&body, "columns")["recall"], 0.75);
+    assert_eq!(counts(&body, "columns")["precision"], 1.0);
+
+    let difference = &body["data"]["differences"][0];
+
+    assert_eq!(difference["kind"], "missing");
+    assert_eq!(
+        difference["path"],
+        "entities[students].attributes[full_name]"
+    );
+}
+
+#[tokio::test]
+async fn a_reference_script_is_measured_against_the_drawn_schema() {
+    let app = TestApp::new();
+
+    let created = created(&app, "course registration").await;
+
+    let (_, generated) = app
+        .authorized(
+            "POST",
+            "/v1/schemas/generate-ddl",
+            Some(json!({ "schema_id": created["id"], "include_comments": true })),
+        )
+        .await;
+
+    let ddl = generated["data"]["ddl"]
+        .as_str()
+        .expect("a script should come back");
+
+    let (status, body) = app
+        .authorized(
+            "POST",
+            "/v1/schemas/compare-sql",
+            Some(json!({ "schema_id": created["id"], "content": ddl })),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    for category in ["tables", "columns", "keys", "foreign_keys", "positions"] {
+        assert_eq!(counts(&body, category)["recall"], 1.0, "{category}: {body}");
+        assert_eq!(
+            counts(&body, category)["precision"],
+            1.0,
+            "{category}: {body}"
+        );
+    }
+
+    // A constraint has a name of its own and no prose, so the one thing the
+    // script cannot carry is what the canvas wrote about the relationship.
+    assert_eq!(body["data"]["equal"], false, "{body}");
+    assert_eq!(
+        body["data"]["differences"].as_array().map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(
+        body["data"]["differences"][0]["expected"],
+        "A student holds many enrollments"
+    );
+    assert_eq!(
+        body["data"]["diagnostics"].as_array().map(Vec::len),
+        Some(0)
+    );
+}
+
+#[tokio::test]
+async fn a_comparison_against_no_script_at_all_is_refused() {
+    let app = TestApp::new();
+
+    let (status, body) = app
+        .authorized(
+            "POST",
+            "/v1/schemas/compare-sql",
+            Some(json!({ "schema_id": "", "content": "  " })),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(body["error"]["errors"].get("schema_id").is_some(), "{body}");
     assert!(body["error"]["errors"].get("content").is_some(), "{body}");
 }
