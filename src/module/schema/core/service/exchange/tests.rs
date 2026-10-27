@@ -21,12 +21,15 @@ fn course_registration() -> Schema {
             DataType::simple(DataTypeKind::Uuid),
         )
         .as_primary_key()
+        .unique()
         .with_description("Surrogate key")]);
 
     let enrollments = Entity::new("e2", "enrollments")
         .with_position(Position::new(400.0, 80.0))
         .with_attributes(vec![
-            Attribute::new("a2", "id", DataType::simple(DataTypeKind::Uuid)).as_primary_key(),
+            Attribute::new("a2", "id", DataType::simple(DataTypeKind::Uuid))
+                .as_primary_key()
+                .unique(),
             Attribute::new("a3", "student_id", DataType::simple(DataTypeKind::Uuid))
                 .required()
                 .referencing(ForeignKeyRef::new("e1", "a1")),
@@ -42,8 +45,8 @@ fn course_registration() -> Schema {
             entities: vec![students, enrollments],
             relationships: vec![Relationship::new(
                 "r1",
-                ("e2", "a3"),
                 ("e1", "a1"),
+                ("e2", "a3"),
                 Cardinality::OneToMany,
             )
             .with_name("enrolls")],
@@ -95,7 +98,7 @@ fn a_column_is_written_in_the_spelling_the_contract_uses() {
     assert_eq!(id["dataType"]["kind"], "DATA_TYPE_KIND_UUID");
     assert_eq!(id["primaryKey"], true);
     assert_eq!(id["nullable"], false);
-    assert_eq!(id["unique"], false);
+    assert_eq!(id["unique"], true);
     assert_eq!(id["description"], "Surrogate key");
 }
 
@@ -131,10 +134,10 @@ fn a_relationship_is_written_in_the_spelling_the_contract_uses() {
     let relationship = &document["relationships"][0];
 
     assert_eq!(relationship["cardinality"], "CARDINALITY_ONE_TO_MANY");
-    assert_eq!(relationship["fromEntityId"], "e2");
-    assert_eq!(relationship["fromAttributeId"], "a3");
-    assert_eq!(relationship["toEntityId"], "e1");
-    assert_eq!(relationship["toAttributeId"], "a1");
+    assert_eq!(relationship["fromEntityId"], "e1");
+    assert_eq!(relationship["fromAttributeId"], "a1");
+    assert_eq!(relationship["toEntityId"], "e2");
+    assert_eq!(relationship["toAttributeId"], "a3");
 }
 
 #[test]
@@ -491,10 +494,56 @@ fn the_reference_comes_back_pointing_at_the_same_column() {
 
     let relationship = &draft.relationships[0];
 
-    assert_eq!(relationship.from_entity_id, enrollments.id);
-    assert_eq!(relationship.from_attribute_id, enrollments.attributes[1].id);
-    assert_eq!(relationship.to_entity_id, students.id);
+    assert_eq!(relationship.from_entity_id, students.id);
+    assert_eq!(relationship.from_attribute_id, students.attributes[0].id);
+    assert_eq!(relationship.to_entity_id, enrollments.id);
+    assert_eq!(relationship.to_attribute_id, enrollments.attributes[1].id);
     assert_eq!(relationship.cardinality, Cardinality::OneToMany);
+}
+
+#[test]
+fn a_late_foreign_key_runs_from_the_key_to_the_column_that_holds_it() {
+    let (draft, _) = from_sql(
+        "CREATE TABLE students (id UUID PRIMARY KEY);
+         CREATE TABLE enrollments (id UUID PRIMARY KEY, student_id UUID NOT NULL);
+         ALTER TABLE enrollments
+             ADD CONSTRAINT fk_enrollments_student_id
+             FOREIGN KEY (student_id) REFERENCES students (id);",
+    );
+
+    let students = &draft.entities[0];
+    let enrollments = &draft.entities[1];
+    let relationship = &draft.relationships[0];
+
+    assert_eq!(relationship.from_entity_id, students.id);
+    assert_eq!(relationship.from_attribute_id, students.attributes[0].id);
+    assert_eq!(relationship.to_entity_id, enrollments.id);
+    assert_eq!(relationship.to_attribute_id, enrollments.attributes[1].id);
+}
+
+#[test]
+fn a_column_in_the_key_comes_back_unique() {
+    let (draft, _) = from_sql(
+        "CREATE TABLE students (id UUID NOT NULL, email TEXT, PRIMARY KEY (id));
+         CREATE TABLE enrollments (
+             student_id UUID NOT NULL,
+             course_id UUID NOT NULL,
+             PRIMARY KEY (student_id, course_id)
+         );",
+    );
+
+    let students = &draft.entities[0];
+
+    assert!(students.attributes[0].unique, "the key implies it");
+    assert!(!students.attributes[1].unique);
+
+    // Neither column of a composite key is unique on its own, but the model
+    // has no way to say "part of the key" other than this flag, and SQL
+    // cannot tell the two readings apart.
+    let enrollments = &draft.entities[1];
+
+    assert!(enrollments.attributes[0].unique);
+    assert!(enrollments.attributes[1].unique);
 }
 
 #[test]
