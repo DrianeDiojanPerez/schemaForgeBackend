@@ -8,6 +8,8 @@ pub use compare::compare;
 pub(crate) use names::{cardinality_name, kind_name};
 
 #[cfg(test)]
+mod round_trip;
+#[cfg(test)]
 mod tests;
 
 use crate::module::schema::core::domain::{ExchangeFormat, Position, Report, Schema, SchemaDraft};
