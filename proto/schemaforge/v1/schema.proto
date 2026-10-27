@@ -279,6 +279,70 @@ message ImportSchemaResponse {
   repeated Diagnostic diagnostics = 2;
 }
 
+// What a comparison counts separately. A schema can come back with every
+// table in place and still have lost its keys, which one number would hide.
+enum ComparisonCategory {
+  COMPARISON_CATEGORY_UNSPECIFIED = 0;
+  COMPARISON_CATEGORY_TABLES = 1;
+  COMPARISON_CATEGORY_COLUMNS = 2;
+  COMPARISON_CATEGORY_KEYS = 3;
+  COMPARISON_CATEGORY_FOREIGN_KEYS = 4;
+  COMPARISON_CATEGORY_RELATIONSHIPS = 5;
+  COMPARISON_CATEGORY_DESCRIPTIONS = 6;
+  COMPARISON_CATEGORY_POSITIONS = 7;
+}
+
+enum DifferenceKind {
+  DIFFERENCE_KIND_UNSPECIFIED = 0;
+  DIFFERENCE_KIND_MISSING = 1;
+  DIFFERENCE_KIND_EXTRA = 2;
+  DIFFERENCE_KIND_CHANGED = 3;
+}
+
+message ComparisonCounts {
+  ComparisonCategory category = 1;
+  uint32 matched = 2;
+  uint32 missing = 3;
+  uint32 extra = 4;
+  uint32 changed = 5;
+  // Of what came back, how much was right, and of what was expected, how
+  // much came back. Nothing to find scores one rather than zero.
+  double precision = 6;
+  double recall = 7;
+}
+
+// One thing that did not survive, named by where it sits in the schema.
+message SchemaDifference {
+  DifferenceKind kind = 1;
+  string path = 2;
+  string expected = 3;
+  string actual = 4;
+}
+
+message CompareSchemasRequest {
+  // The schema as it was drawn. Stored by id, or sent whole, the same way
+  // ValidateSchema takes its target.
+  oneof expected {
+    string expected_id = 1;
+    Schema expected_draft = 2;
+  }
+  // What to hold against it, usually what a round trip through SQL or JSON
+  // handed back.
+  oneof actual {
+    string actual_id = 3;
+    Schema actual_draft = 4;
+  }
+  // Optional for the same reason as on GenerateDdl: a client that says
+  // nothing has its layout compared too.
+  optional bool include_positions = 5;
+}
+
+message CompareSchemasResponse {
+  bool equal = 1;
+  repeated ComparisonCounts counts = 2;
+  repeated SchemaDifference differences = 3;
+}
+
 service SchemaService {
   rpc CreateSchema(CreateSchemaRequest) returns (CreateSchemaResponse);
   rpc GetSchema(GetSchemaRequest) returns (GetSchemaResponse);
@@ -294,6 +358,12 @@ service SchemaService {
   // with an empty script rather than as a failed call, the same way
   // ValidateSchema answers.
   rpc GenerateDdl(GenerateDdlRequest) returns (GenerateDdlResponse);
+
+  // Measures one schema against another and reports what differs, so a
+  // case study can say what a round trip kept rather than claim it kept
+  // everything. Nothing is verified first: measuring a broken schema is the
+  // point.
+  rpc CompareSchemas(CompareSchemasRequest) returns (CompareSchemasResponse);
 
   // Writes the schema out as a file. Nothing is verified first, because a
   // half-drawn diagram is still worth saving and coming back to.

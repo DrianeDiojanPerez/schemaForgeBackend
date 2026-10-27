@@ -599,6 +599,98 @@ paths:
         "501":
           $ref: "#/components/responses/NotImplemented"
 
+  /v1/schemas/compare:
+    post:
+      tags: [Schemas]
+      summary: Measure one schema against another
+      description: |
+        Turns "it round-trips" into a number. Each side is either a stored
+        `..._schema_id` or an unsaved `..._schema`, never both, and the
+        counts come back per category so a schema that kept every table but
+        lost its keys reads as exactly that.
+
+        Entities and columns are matched by name, case-insensitively, since
+        a schema that has been through SQL comes back with fresh ids.
+        Precision is how much of what came back was right, recall is how much
+        of what was expected came back, and a category with nothing to find
+        scores one.
+
+        Nothing is verified first. Measuring a broken schema against a
+        reference is the point.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                expected_schema_id: { type: string }
+                expected_schema: { $ref: "#/components/schemas/SchemaDraft" }
+                actual_schema_id: { type: string }
+                actual_schema: { $ref: "#/components/schemas/SchemaDraft" }
+                include_positions:
+                  type: boolean
+                  default: true
+      responses:
+        "200":
+          description: What matched, what did not, and where.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/SchemaComparison" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+
+  /v1/schemas/compare-sql:
+    post:
+      tags: [Schemas]
+      summary: Measure a reference script against a stored schema
+      description: |
+        Reads `content` as PostgreSQL the way `POST /v1/schemas/import` does,
+        then compares what it read against the stored schema named by
+        `schema_id`. A hand-written reference script can be measured against
+        a drawn one without the canvas having to open it first.
+
+        Anything the reader had to skip comes back in `diagnostics` as
+        `SF-IMPORT-SKIPPED` warnings, so a low score can be told apart from a
+        script that was only partly readable.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [schema_id, content]
+              properties:
+                schema_id: { type: string }
+                content: { type: string }
+                include_positions:
+                  type: boolean
+                  default: true
+      responses:
+        "200":
+          description: What matched, what did not, and what was skipped.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/SchemaComparison" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+
   /v1/schemas/export:
     post:
       tags: [Schemas]
@@ -1032,6 +1124,60 @@ components:
           oneOf:
             - { $ref: "#/components/schemas/Position" }
             - { type: "null" }
+
+    SchemaComparison:
+      type: object
+      description: How much of one schema came back in another.
+      properties:
+        equal:
+          type: boolean
+          description: True when nothing is missing, extra or changed.
+        counts:
+          type: array
+          items: { $ref: "#/components/schemas/ComparisonCounts" }
+        differences:
+          type: array
+          items: { $ref: "#/components/schemas/SchemaDifference" }
+        diagnostics:
+          type: array
+          items: { $ref: "#/components/schemas/Diagnostic" }
+          description: >-
+            What reading a script had to skip. Always empty when both sides
+            were schemas the backend already held.
+
+    ComparisonCounts:
+      type: object
+      description: One category's tally. Every category is reported, including the empty ones.
+      properties:
+        category:
+          type: string
+          enum:
+            [
+              tables,
+              columns,
+              keys,
+              foreign_keys,
+              relationships,
+              descriptions,
+              positions,
+            ]
+        matched: { type: integer, format: int32 }
+        missing: { type: integer, format: int32 }
+        extra: { type: integer, format: int32 }
+        changed: { type: integer, format: int32 }
+        precision: { type: number, format: double }
+        recall: { type: number, format: double }
+
+    SchemaDifference:
+      type: object
+      description: One thing that did not survive, named by where it sits.
+      properties:
+        kind: { type: string, enum: [missing, extra, changed] }
+        path:
+          type: string
+          examples: ["entities[students].attributes[email].nullable"]
+        expected: { type: string }
+        actual: { type: string }
 
   responses:
     BadRequest:

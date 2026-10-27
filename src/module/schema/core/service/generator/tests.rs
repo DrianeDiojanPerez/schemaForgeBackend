@@ -1,48 +1,8 @@
-use chrono::DateTime;
-
-use crate::module::schema::core::domain::{
-    Attribute, DataType, DataTypeKind, Entity, ForeignKeyRef, Position, Schema, SchemaDraft,
-};
+use crate::module::schema::core::domain::{DataType, DataTypeKind, Entity, Position};
 use crate::module::schema::core::ports::{GenerateOptions, Generator};
+use crate::module::schema::core::service::fixtures::{column, key, reference, schema, table};
 
 use super::PostgresGenerator;
-
-fn key(name: &str) -> Attribute {
-    Attribute::new(
-        format!("a.{name}"),
-        name,
-        DataType::simple(DataTypeKind::Uuid),
-    )
-    .as_primary_key()
-}
-
-fn column(name: &str, data_type: DataType) -> Attribute {
-    Attribute::new(format!("a.{name}"), name, data_type)
-}
-
-fn reference(name: &str, entity: &str, attribute: &str) -> Attribute {
-    column(name, DataType::simple(DataTypeKind::Uuid)).referencing(ForeignKeyRef::new(
-        format!("e.{entity}"),
-        format!("a.{attribute}"),
-    ))
-}
-
-fn table(name: &str, attributes: Vec<Attribute>) -> Entity {
-    Entity::new(format!("e.{name}"), name).with_attributes(attributes)
-}
-
-fn schema(entities: Vec<Entity>) -> Schema {
-    Schema::new(
-        "s1",
-        SchemaDraft {
-            name: "case study".to_owned(),
-            description: String::new(),
-            entities,
-            relationships: Vec::new(),
-        },
-        DateTime::from_timestamp(0, 0).expect("a fixed instant"),
-    )
-}
 
 fn options(include_comments: bool, include_positions: bool) -> GenerateOptions {
     GenerateOptions {

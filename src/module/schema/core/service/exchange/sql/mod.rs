@@ -236,7 +236,10 @@ fn entity_from(parsed: &ParsedTable) -> Entity {
 
                 attribute.nullable = column.nullable;
                 attribute.primary_key = column.primary_key;
-                attribute.unique = column.unique;
+                // The generator leaves UNIQUE off a key column because the
+                // key already says it, so the flag is put back rather than
+                // read off a script that had no reason to carry it.
+                attribute.unique = column.unique || column.primary_key;
                 attribute.default_value = column.default_value.clone();
 
                 attribute
@@ -251,47 +254,51 @@ fn link(draft: &mut SchemaDraft, holder: &str, key: &ParsedForeignKey, report: &
         holder, key.column, key.table
     );
 
-    let (Some(from), Some(to)) = (find(draft, holder), find(draft, &key.table)) else {
+    let (Some(holder_index), Some(target_index)) = (find(draft, holder), find(draft, &key.table))
+    else {
         report.push(Diagnostic::warning(code::IMPORT_SKIPPED, note));
         return;
     };
 
-    let Some(from_attribute) = attribute_id(&draft.entities[from], &key.column) else {
+    let Some(holder_attribute) = attribute_id(&draft.entities[holder_index], &key.column) else {
         report.push(Diagnostic::warning(code::IMPORT_SKIPPED, note));
         return;
     };
 
-    let to_attribute = match &key.target {
-        Some(name) => attribute_id(&draft.entities[to], name),
+    let target_attribute = match &key.target {
+        Some(name) => attribute_id(&draft.entities[target_index], name),
         // `REFERENCES other` with no column means the other table's key.
-        None => draft.entities[to]
+        None => draft.entities[target_index]
             .primary_key()
             .first()
             .map(|attribute| attribute.id.clone()),
     };
 
-    let Some(to_attribute) = to_attribute else {
+    let Some(target_attribute) = target_attribute else {
         report.push(Diagnostic::warning(code::IMPORT_SKIPPED, note));
         return;
     };
 
-    let (from_entity, to_entity) = (
-        draft.entities[from].id.clone(),
-        draft.entities[to].id.clone(),
+    let (holder_entity, target_entity) = (
+        draft.entities[holder_index].id.clone(),
+        draft.entities[target_index].id.clone(),
     );
 
-    if let Some(attribute) = draft.entities[from]
+    if let Some(attribute) = draft.entities[holder_index]
         .attributes
         .iter_mut()
-        .find(|attribute| attribute.id == from_attribute)
+        .find(|attribute| attribute.id == holder_attribute)
     {
-        attribute.foreign_key = Some(ForeignKeyRef::new(&to_entity, &to_attribute));
+        attribute.foreign_key = Some(ForeignKeyRef::new(&target_entity, &target_attribute));
     }
 
+    // The canvas draws the line from the key it points at to the column that
+    // holds it, and the generator never reads the direction back, so the one
+    // side leads here too.
     draft.relationships.push(Relationship::new(
         fresh("r"),
-        (&from_entity, &from_attribute),
-        (&to_entity, &to_attribute),
+        (&target_entity, &target_attribute),
+        (&holder_entity, &holder_attribute),
         Cardinality::OneToMany,
     ));
 }

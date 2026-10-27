@@ -21,7 +21,7 @@ fn primary_key(id: &str, name: &str) -> v1::Attribute {
         data_type: data_type(v1::DataTypeKind::Uuid),
         nullable: false,
         primary_key: true,
-        unique: false,
+        unique: true,
         foreign_key: None,
         default_value: None,
     }
@@ -79,10 +79,10 @@ fn course_registration() -> (Vec<v1::Entity>, Vec<v1::Relationship>) {
         id: "r1".to_owned(),
         name: "enrolls".to_owned(),
         description: "A student holds many enrollments".to_owned(),
-        from_entity_id: "e2".to_owned(),
-        from_attribute_id: "a4".to_owned(),
-        to_entity_id: "e1".to_owned(),
-        to_attribute_id: "a1".to_owned(),
+        from_entity_id: "e1".to_owned(),
+        from_attribute_id: "a1".to_owned(),
+        to_entity_id: "e2".to_owned(),
+        to_attribute_id: "a4".to_owned(),
         cardinality: v1::Cardinality::OneToMany as i32,
     };
 
@@ -921,6 +921,131 @@ async fn a_file_nobody_can_read_is_refused() {
         })
         .await
         .expect_err("the file should be refused");
+
+    assert_eq!(status.code(), Code::InvalidArgument);
+}
+
+fn counts(
+    response: &v1::CompareSchemasResponse,
+    category: v1::ComparisonCategory,
+) -> &v1::ComparisonCounts {
+    response
+        .counts
+        .iter()
+        .find(|counts| counts.category == category as i32)
+        .unwrap_or_else(|| panic!("{category:?} should be one of the categories"))
+}
+
+#[tokio::test]
+async fn a_schema_measured_against_itself_matches_everywhere() {
+    let server = TestServer::start().await;
+    let mut client = server.schema_client().await;
+
+    let created = client
+        .create_schema(create_request("measured"))
+        .await
+        .expect("creation should succeed")
+        .into_inner()
+        .schema
+        .expect("a created schema should come back");
+
+    let comparison = client
+        .compare_schemas(v1::CompareSchemasRequest {
+            expected: Some(v1::compare_schemas_request::Expected::ExpectedId(
+                created.id.clone(),
+            )),
+            actual: Some(v1::compare_schemas_request::Actual::ActualId(created.id)),
+            include_positions: None,
+        })
+        .await
+        .expect("the comparison should succeed")
+        .into_inner();
+
+    assert!(comparison.equal, "{:?}", comparison.differences);
+    assert!(comparison.differences.is_empty());
+
+    let tables = counts(&comparison, v1::ComparisonCategory::Tables);
+
+    assert_eq!(tables.matched, 2);
+    assert_eq!(tables.precision, 1.0);
+    assert_eq!(tables.recall, 1.0);
+
+    // Every category is reported, including the ones with nothing in them,
+    // so a reader can tell "looked at and whole" from "not looked at".
+    assert_eq!(comparison.counts.len(), 7);
+}
+
+#[tokio::test]
+async fn a_column_that_did_not_come_back_is_counted_and_named() {
+    let server = TestServer::start().await;
+    let mut client = server.schema_client().await;
+
+    let created = client
+        .create_schema(create_request("measured"))
+        .await
+        .expect("creation should succeed")
+        .into_inner()
+        .schema
+        .expect("a created schema should come back");
+
+    let (mut entities, relationships) = course_registration();
+    entities[0].attributes.pop();
+
+    let comparison = client
+        .compare_schemas(v1::CompareSchemasRequest {
+            expected: Some(v1::compare_schemas_request::Expected::ExpectedId(
+                created.id,
+            )),
+            actual: Some(v1::compare_schemas_request::Actual::ActualDraft(
+                v1::Schema {
+                    id: String::new(),
+                    name: "measured".to_owned(),
+                    description: String::new(),
+                    entities,
+                    relationships,
+                    created_at: String::new(),
+                    updated_at: String::new(),
+                },
+            )),
+            include_positions: None,
+        })
+        .await
+        .expect("the comparison should succeed")
+        .into_inner();
+
+    assert!(!comparison.equal);
+
+    let columns = counts(&comparison, v1::ComparisonCategory::Columns);
+
+    assert_eq!(columns.missing, 1);
+    assert_eq!(columns.matched, 3);
+    assert_eq!(columns.recall, 0.75);
+    assert_eq!(columns.precision, 1.0);
+
+    assert_eq!(comparison.differences.len(), 1);
+    assert_eq!(
+        comparison.differences[0].kind,
+        v1::DifferenceKind::Missing as i32
+    );
+    assert_eq!(
+        comparison.differences[0].path,
+        "entities[students].attributes[full_name]"
+    );
+}
+
+#[tokio::test]
+async fn a_comparison_naming_no_target_is_refused() {
+    let server = TestServer::start().await;
+    let mut client = server.schema_client().await;
+
+    let status = client
+        .compare_schemas(v1::CompareSchemasRequest {
+            expected: None,
+            actual: None,
+            include_positions: None,
+        })
+        .await
+        .expect_err("a comparison with nothing to compare should be refused");
 
     assert_eq!(status.code(), Code::InvalidArgument);
 }

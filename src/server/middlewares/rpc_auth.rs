@@ -43,9 +43,8 @@ fn access_for(path: &str) -> Access {
     };
 
     match method {
-        "GetSchema" | "ListSchemas" | "ValidateSchema" | "GenerateDdl" | "ExportSchema" => {
-            Access::Requires("Schemas.View All")
-        }
+        "GetSchema" | "ListSchemas" | "ValidateSchema" | "CompareSchemas" | "GenerateDdl"
+        | "ExportSchema" => Access::Requires("Schemas.View All"),
         // Importing stores nothing, but the only reason to read a file is
         // to make a schema out of it, so it needs the same permission.
         "CreateSchema" | "ImportSchema" => Access::Requires("Schemas.Create"),
@@ -226,6 +225,10 @@ mod tests {
         );
         assert_eq!(
             action("/schemaforge.v1.SchemaService/ValidateSchema"),
+            Some("Schemas.View All")
+        );
+        assert_eq!(
+            action("/schemaforge.v1.SchemaService/CompareSchemas"),
             Some("Schemas.View All")
         );
         assert_eq!(

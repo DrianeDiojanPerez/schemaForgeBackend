@@ -21,6 +21,8 @@ pub fn routes(services: &Services, auth: Arc<dyn Auth>) -> Router {
         .route("/v1/schemas", post(schema::create))
         .route("/v1/schemas/validate", post(schema::validate))
         .route("/v1/schemas/generate-ddl", post(schema::generate_ddl))
+        .route("/v1/schemas/compare", post(schema::compare))
+        .route("/v1/schemas/compare-sql", post(schema::compare_sql))
         .route("/v1/schemas/export", post(schema::export))
         .route("/v1/schemas/import", post(schema::import))
         .route("/v1/schemas/{schema-id}", get(schema::get))

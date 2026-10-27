@@ -1,4 +1,8 @@
 pub(crate) mod exchange;
+
+#[cfg(test)]
+pub(crate) mod fixtures;
+
 mod generator;
 mod schema;
 mod verifier;

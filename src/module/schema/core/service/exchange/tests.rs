@@ -1,56 +1,15 @@
-use chrono::DateTime;
 use serde_json::Value;
 
 use crate::module::schema::core::domain::{
-    diagnostic_code, Attribute, Cardinality, DataType, DataTypeKind, Entity, ExchangeFormat,
-    ForeignKeyRef, Position, Relationship, Report, Schema, SchemaDraft, Severity,
+    diagnostic_code, Cardinality, DataType, DataTypeKind, Entity, ExchangeFormat, Position, Report,
+    SchemaDraft, Severity,
 };
 use crate::module::schema::core::ports::{GenerateOptions, Generator};
+use crate::module::schema::core::service::fixtures::course_registration;
 use crate::module::schema::core::service::PostgresGenerator;
 use crate::package::errdef::code;
 
 use super::{export, import};
-
-fn course_registration() -> Schema {
-    let students = Entity::new("e1", "students")
-        .with_description("Everyone enrolled")
-        .with_position(Position::new(40.0, 80.0))
-        .with_attributes(vec![Attribute::new(
-            "a1",
-            "id",
-            DataType::simple(DataTypeKind::Uuid),
-        )
-        .as_primary_key()
-        .with_description("Surrogate key")]);
-
-    let enrollments = Entity::new("e2", "enrollments")
-        .with_position(Position::new(400.0, 80.0))
-        .with_attributes(vec![
-            Attribute::new("a2", "id", DataType::simple(DataTypeKind::Uuid)).as_primary_key(),
-            Attribute::new("a3", "student_id", DataType::simple(DataTypeKind::Uuid))
-                .required()
-                .referencing(ForeignKeyRef::new("e1", "a1")),
-            Attribute::new("a4", "grade", DataType::numeric(4, 2)).with_default("0.00"),
-            Attribute::new("a5", "note", DataType::varchar(255)),
-        ]);
-
-    Schema::new(
-        "s1",
-        SchemaDraft {
-            name: "Course Registration".to_owned(),
-            description: "The academic case study".to_owned(),
-            entities: vec![students, enrollments],
-            relationships: vec![Relationship::new(
-                "r1",
-                ("e2", "a3"),
-                ("e1", "a1"),
-                Cardinality::OneToMany,
-            )
-            .with_name("enrolls")],
-        },
-        DateTime::from_timestamp(1_700_000_000, 0).expect("a fixed instant"),
-    )
-}
 
 fn exported(include_positions: bool) -> Value {
     let file = export(
@@ -82,9 +41,9 @@ fn an_entity_keeps_its_ids_because_the_references_are_built_on_them() {
     let document = exported(true);
     let students = &document["entities"][0];
 
-    assert_eq!(students["id"], "e1");
+    assert_eq!(students["id"], "e.students");
     assert_eq!(students["name"], "students");
-    assert_eq!(students["attributes"][0]["id"], "a1");
+    assert_eq!(students["attributes"][0]["id"], "a.id");
 }
 
 #[test]
@@ -95,7 +54,7 @@ fn a_column_is_written_in_the_spelling_the_contract_uses() {
     assert_eq!(id["dataType"]["kind"], "DATA_TYPE_KIND_UUID");
     assert_eq!(id["primaryKey"], true);
     assert_eq!(id["nullable"], false);
-    assert_eq!(id["unique"], false);
+    assert_eq!(id["unique"], true);
     assert_eq!(id["description"], "Surrogate key");
 }
 
@@ -117,8 +76,8 @@ fn an_unset_field_is_left_out_rather_than_written_as_null() {
     let document = exported(true);
     let columns = &document["entities"][1]["attributes"];
 
-    assert_eq!(columns[1]["foreignKey"]["entityId"], "e1");
-    assert_eq!(columns[1]["foreignKey"]["attributeId"], "a1");
+    assert_eq!(columns[1]["foreignKey"]["entityId"], "e.students");
+    assert_eq!(columns[1]["foreignKey"]["attributeId"], "a.id");
     assert!(columns[0].get("foreignKey").is_none(), "{columns}");
 
     assert_eq!(columns[2]["defaultValue"], "0.00");
@@ -131,10 +90,10 @@ fn a_relationship_is_written_in_the_spelling_the_contract_uses() {
     let relationship = &document["relationships"][0];
 
     assert_eq!(relationship["cardinality"], "CARDINALITY_ONE_TO_MANY");
-    assert_eq!(relationship["fromEntityId"], "e2");
-    assert_eq!(relationship["fromAttributeId"], "a3");
-    assert_eq!(relationship["toEntityId"], "e1");
-    assert_eq!(relationship["toAttributeId"], "a1");
+    assert_eq!(relationship["fromEntityId"], "e.students");
+    assert_eq!(relationship["fromAttributeId"], "a.id");
+    assert_eq!(relationship["toEntityId"], "e.enrollments");
+    assert_eq!(relationship["toAttributeId"], "a.student_id");
 }
 
 #[test]
@@ -189,18 +148,6 @@ fn refused(content: &str) -> String {
     assert_eq!(error.app_code(), code::VALIDATION_FAILED);
 
     error.to_string()
-}
-
-#[test]
-fn a_schema_survives_a_round_trip_through_the_file() {
-    let original = course_registration();
-    let file = export(&original, ExchangeFormat::Json, true).expect("export should succeed");
-    let draft = imported(&file.content, true);
-
-    assert_eq!(draft.name, original.name);
-    assert_eq!(draft.description, original.description);
-    assert_eq!(draft.entities, original.entities);
-    assert_eq!(draft.relationships, original.relationships);
 }
 
 #[test]
@@ -436,44 +383,6 @@ fn only_table(content: &str) -> Entity {
     draft.entities.into_iter().next().expect("one table")
 }
 
-/// Ids are minted fresh on the way in, so two schemas are the same shape when
-/// everything else about them matches.
-fn same_shape(left: &Entity, right: &Entity) {
-    assert_eq!(left.name, right.name);
-    assert_eq!(left.description, right.description);
-    assert_eq!(left.position, right.position);
-    assert_eq!(left.attributes.len(), right.attributes.len(), "{left:?}");
-
-    for (left, right) in left.attributes.iter().zip(&right.attributes) {
-        assert_eq!(left.name, right.name);
-        assert_eq!(left.description, right.description);
-        assert_eq!(left.data_type, right.data_type);
-        assert_eq!(left.nullable, right.nullable);
-        assert_eq!(left.primary_key, right.primary_key);
-        assert_eq!(left.unique, right.unique);
-        assert_eq!(left.default_value, right.default_value);
-        assert_eq!(left.foreign_key.is_some(), right.foreign_key.is_some());
-    }
-}
-
-#[test]
-fn a_schema_survives_a_round_trip_through_the_generated_script() {
-    let original = course_registration();
-    let script = PostgresGenerator.generate(&original, GenerateOptions::default());
-    let (draft, report) = from_sql(&script);
-
-    assert!(
-        report.diagnostics.is_empty(),
-        "the generator's own output should read back whole: {:?}",
-        report.diagnostics
-    );
-
-    assert_eq!(draft.entities.len(), 2);
-    same_shape(&draft.entities[0], &original.entities[0]);
-    same_shape(&draft.entities[1], &original.entities[1]);
-    assert_eq!(draft.relationships.len(), 1);
-}
-
 #[test]
 fn the_reference_comes_back_pointing_at_the_same_column() {
     let script = PostgresGenerator.generate(&course_registration(), GenerateOptions::default());
@@ -491,10 +400,56 @@ fn the_reference_comes_back_pointing_at_the_same_column() {
 
     let relationship = &draft.relationships[0];
 
-    assert_eq!(relationship.from_entity_id, enrollments.id);
-    assert_eq!(relationship.from_attribute_id, enrollments.attributes[1].id);
-    assert_eq!(relationship.to_entity_id, students.id);
+    assert_eq!(relationship.from_entity_id, students.id);
+    assert_eq!(relationship.from_attribute_id, students.attributes[0].id);
+    assert_eq!(relationship.to_entity_id, enrollments.id);
+    assert_eq!(relationship.to_attribute_id, enrollments.attributes[1].id);
     assert_eq!(relationship.cardinality, Cardinality::OneToMany);
+}
+
+#[test]
+fn a_late_foreign_key_runs_from_the_key_to_the_column_that_holds_it() {
+    let (draft, _) = from_sql(
+        "CREATE TABLE students (id UUID PRIMARY KEY);
+         CREATE TABLE enrollments (id UUID PRIMARY KEY, student_id UUID NOT NULL);
+         ALTER TABLE enrollments
+             ADD CONSTRAINT fk_enrollments_student_id
+             FOREIGN KEY (student_id) REFERENCES students (id);",
+    );
+
+    let students = &draft.entities[0];
+    let enrollments = &draft.entities[1];
+    let relationship = &draft.relationships[0];
+
+    assert_eq!(relationship.from_entity_id, students.id);
+    assert_eq!(relationship.from_attribute_id, students.attributes[0].id);
+    assert_eq!(relationship.to_entity_id, enrollments.id);
+    assert_eq!(relationship.to_attribute_id, enrollments.attributes[1].id);
+}
+
+#[test]
+fn a_column_in_the_key_comes_back_unique() {
+    let (draft, _) = from_sql(
+        "CREATE TABLE students (id UUID NOT NULL, email TEXT, PRIMARY KEY (id));
+         CREATE TABLE enrollments (
+             student_id UUID NOT NULL,
+             course_id UUID NOT NULL,
+             PRIMARY KEY (student_id, course_id)
+         );",
+    );
+
+    let students = &draft.entities[0];
+
+    assert!(students.attributes[0].unique, "the key implies it");
+    assert!(!students.attributes[1].unique);
+
+    // Neither column of a composite key is unique on its own, but the model
+    // has no way to say "part of the key" other than this flag, and SQL
+    // cannot tell the two readings apart.
+    let enrollments = &draft.entities[1];
+
+    assert!(enrollments.attributes[0].unique);
+    assert!(enrollments.attributes[1].unique);
 }
 
 #[test]

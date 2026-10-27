@@ -9,8 +9,9 @@
 //! one, so a caller fixing a malformed request sees every problem at once.
 
 use crate::module::schema::core::domain::{
-    Attribute, Cardinality, DataType, DataTypeKind, Dialect, Entity, ExchangeFormat, ForeignKeyRef,
-    Position, Relationship, Schema, SchemaDraft, SchemaSummary, Severity,
+    Attribute, Cardinality, Category, Comparison, DataType, DataTypeKind, Dialect, DifferenceKind,
+    Entity, ExchangeFormat, ForeignKeyRef, Position, Relationship, Schema, SchemaDraft,
+    SchemaSummary, Severity,
 };
 use crate::module::schema::core::domain::{Diagnostic, Report};
 use crate::package::errdef::Error;
@@ -175,6 +176,56 @@ pub fn import_format_from(value: i32) -> ExchangeFormat {
     match v1::ImportFormat::try_from(value) {
         Ok(v1::ImportFormat::Sql) => ExchangeFormat::Sql,
         _ => ExchangeFormat::Json,
+    }
+}
+
+pub fn comparison_to(
+    comparison: Comparison,
+) -> (Vec<v1::ComparisonCounts>, Vec<v1::SchemaDifference>) {
+    let counts = Category::VARIANTS
+        .iter()
+        .map(|category| {
+            let counts = comparison.counts(*category);
+
+            v1::ComparisonCounts {
+                category: category_to(*category) as i32,
+                matched: counts.matched,
+                missing: counts.missing,
+                extra: counts.extra,
+                changed: counts.changed,
+                precision: counts.precision(),
+                recall: counts.recall(),
+            }
+        })
+        .collect();
+
+    let differences = comparison
+        .differences
+        .into_iter()
+        .map(|difference| v1::SchemaDifference {
+            kind: match difference.kind {
+                DifferenceKind::Missing => v1::DifferenceKind::Missing,
+                DifferenceKind::Extra => v1::DifferenceKind::Extra,
+                DifferenceKind::Changed => v1::DifferenceKind::Changed,
+            } as i32,
+            path: difference.path,
+            expected: difference.expected,
+            actual: difference.actual,
+        })
+        .collect();
+
+    (counts, differences)
+}
+
+fn category_to(category: Category) -> v1::ComparisonCategory {
+    match category {
+        Category::Tables => v1::ComparisonCategory::Tables,
+        Category::Columns => v1::ComparisonCategory::Columns,
+        Category::Keys => v1::ComparisonCategory::Keys,
+        Category::ForeignKeys => v1::ComparisonCategory::ForeignKeys,
+        Category::Relationships => v1::ComparisonCategory::Relationships,
+        Category::Descriptions => v1::ComparisonCategory::Descriptions,
+        Category::Positions => v1::ComparisonCategory::Positions,
     }
 }
 

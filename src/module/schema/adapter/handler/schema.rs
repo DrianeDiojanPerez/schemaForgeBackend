@@ -5,10 +5,13 @@ use axum::Json as AxumJson;
 use serde::{Deserialize, Serialize};
 
 use crate::module::schema::adapter::handler::mapper::{
-    self, Diagnostic, Schema, SchemaPayload, SchemaSummary, Violations,
+    self, ComparisonCounts, Diagnostic, Schema, SchemaDifference, SchemaPayload, SchemaSummary,
+    Violations,
 };
+use crate::module::schema::core::domain::{Comparison, ExchangeFormat};
 use crate::module::schema::core::ports::{
-    ExportRequest, GenerateOptions, GenerateRequest, ImportRequest, SchemaService, ValidationTarget,
+    CompareRequest, ExportRequest, GenerateOptions, GenerateRequest, ImportRequest, SchemaService,
+    ValidationTarget,
 };
 use crate::package::auth::AuthUser;
 use crate::package::errdef::Error;
@@ -78,6 +81,43 @@ pub struct ImportSchemaRequest {
 #[derive(Debug, Serialize)]
 pub struct ImportedSchema {
     pub draft: Schema,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CompareSchemasRequest {
+    #[serde(default)]
+    pub expected_schema_id: Option<String>,
+    #[serde(default)]
+    pub expected_schema: Option<SchemaPayload>,
+    #[serde(default)]
+    pub actual_schema_id: Option<String>,
+    #[serde(default)]
+    pub actual_schema: Option<SchemaPayload>,
+    #[serde(default)]
+    pub include_positions: Option<bool>,
+}
+
+/// A reference script against a drawn schema. The script is read the way
+/// ImportSchema reads one, so a hand-written file can be measured against
+/// the canvas without the canvas having to open it first.
+#[derive(Debug, Deserialize)]
+pub struct CompareSqlRequest {
+    #[serde(default)]
+    pub schema_id: String,
+    #[serde(default)]
+    pub content: String,
+    #[serde(default)]
+    pub include_positions: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SchemaComparison {
+    pub equal: bool,
+    pub counts: Vec<ComparisonCounts>,
+    pub differences: Vec<SchemaDifference>,
+    /// What reading the script had to skip. Always empty when both sides
+    /// were schemas the backend already held.
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -262,6 +302,85 @@ pub async fn export(
     }))
 }
 
+#[tracing::instrument(name = "SchemaHandler.Compare", skip_all)]
+pub async fn compare(
+    State(service): State<SchemaState>,
+    caller: AuthUser,
+    Json(payload): Json<CompareSchemasRequest>,
+) -> Result<AxumJson<Response<SchemaComparison>>, Error> {
+    let comparison = service
+        .compare(
+            caller.id(),
+            CompareRequest {
+                expected: target_from(payload.expected_schema_id, payload.expected_schema)?,
+                actual: target_from(payload.actual_schema_id, payload.actual_schema)?,
+                include_positions: payload.include_positions.unwrap_or(true),
+            },
+        )
+        .await?;
+
+    Ok(response::ok(answer(comparison, Vec::new())))
+}
+
+#[tracing::instrument(name = "SchemaHandler.CompareSql", skip_all)]
+pub async fn compare_sql(
+    State(service): State<SchemaState>,
+    caller: AuthUser,
+    Json(payload): Json<CompareSqlRequest>,
+) -> Result<AxumJson<Response<SchemaComparison>>, Error> {
+    let mut error = Error::validation("failed payload validation");
+
+    if payload.schema_id.trim().is_empty() {
+        error.push_violation("schema_id", "field is required and cannot be empty");
+    }
+
+    if payload.content.trim().is_empty() {
+        error.push_violation("content", "field is required and cannot be empty");
+    }
+
+    if error.has_violations() {
+        return Err(error);
+    }
+
+    let include_positions = payload.include_positions.unwrap_or(true);
+
+    let imported = service
+        .import(ImportRequest {
+            content: payload.content,
+            format: ExchangeFormat::Sql,
+            include_positions,
+        })
+        .await?;
+
+    let comparison = service
+        .compare(
+            caller.id(),
+            CompareRequest {
+                expected: ValidationTarget::Stored(payload.schema_id),
+                actual: ValidationTarget::Draft(Box::new(imported.draft)),
+                include_positions,
+            },
+        )
+        .await?;
+
+    Ok(response::ok(answer(
+        comparison,
+        mapper::report_to(imported.report),
+    )))
+}
+
+fn answer(comparison: Comparison, diagnostics: Vec<Diagnostic>) -> SchemaComparison {
+    let equal = comparison.is_equal();
+    let (counts, differences) = mapper::comparison_to(comparison);
+
+    SchemaComparison {
+        equal,
+        counts,
+        differences,
+        diagnostics,
+    }
+}
+
 pub async fn import(
     State(service): State<SchemaState>,
     Json(payload): Json<ImportSchemaRequest>,
@@ -434,6 +553,18 @@ mod tests {
                 draft: self.schema(),
                 report: Report::default(),
             })
+        }
+
+        async fn compare(
+            &self,
+            _caller: Uuid,
+            _request: CompareRequest,
+        ) -> Result<Comparison, Error> {
+            if let Some(failure) = self.fail_with {
+                return Err(failure());
+            }
+
+            Ok(Comparison::default())
         }
     }
 

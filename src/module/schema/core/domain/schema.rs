@@ -65,6 +65,17 @@ impl Schema {
         self.updated_at = now;
     }
 
+    /// The drawn parts on their own. A comparison works on these, because
+    /// an id and a timestamp say nothing about the diagram.
+    pub fn draft(&self) -> SchemaDraft {
+        SchemaDraft {
+            name: self.name.clone(),
+            description: self.description.clone(),
+            entities: self.entities.clone(),
+            relationships: self.relationships.clone(),
+        }
+    }
+
     pub fn entity(&self, entity_id: &str) -> Option<&Entity> {
         self.entities.iter().find(|entity| entity.id == entity_id)
     }
