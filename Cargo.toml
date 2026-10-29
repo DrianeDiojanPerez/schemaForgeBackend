@@ -10,6 +10,12 @@ publish = false
 name = "server"
 path = "src/main.rs"
 
+# `#[async_trait]` writes `#[must_use]` onto methods that already return a
+# boxed future, which is must-use on its own. Every hit comes from the macro
+# rather than from code anyone here wrote.
+[lints.clippy]
+double_must_use = "allow"
+
 [dependencies]
 # http server
 axum = { version = "0.8", features = ["macros"] }
