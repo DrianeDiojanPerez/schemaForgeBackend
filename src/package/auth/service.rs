@@ -452,6 +452,7 @@ mod tests {
     use crate::module::schema::core::domain::{DomainError, Schema, SchemaDraft, SchemaSummary};
     use crate::module::schema::core::ports::SchemaRepository;
     use crate::module::schema::core::sample::SAMPLE_SCHEMA_NAME;
+    use crate::module::schema::core::service::fake_shares::{FakeDirectory, FakeShares};
     use crate::module::schema::Services;
     use crate::package::auth::{GoogleAccount, PasswordReset};
     use crate::package::emailer::EmailerError;
@@ -769,9 +770,31 @@ mod tests {
         google: Arc<FakeGoogle>,
         schemas: Arc<FakeSchemas>,
     ) -> (AuthService, Arc<dyn TokenGenerator>) {
+        service_with_shares(
+            store,
+            mailer,
+            google,
+            schemas,
+            Arc::new(FakeShares::default()),
+        )
+    }
+
+    fn service_with_shares(
+        store: Arc<FakeStore>,
+        mailer: Arc<FakeMailer>,
+        google: Arc<FakeGoogle>,
+        schemas: Arc<FakeSchemas>,
+        shares: Arc<FakeShares>,
+    ) -> (AuthService, Arc<dyn TokenGenerator>) {
         let jwt: Arc<dyn TokenGenerator> =
             Arc::new(HmacTokenGenerator::new(&MaskedBytes::new("secret")));
-        let schema = Services::with_repository(schemas).schema;
+        let schema = Services::with_repositories(
+            schemas,
+            shares,
+            Arc::new(FakeDirectory::default()),
+            mailer.clone(),
+        )
+        .schema;
 
         (
             AuthService::new(jwt.clone(), store, mailer, google, schema, 3600, 604_800),

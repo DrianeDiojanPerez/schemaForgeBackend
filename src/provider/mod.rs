@@ -42,7 +42,7 @@ impl Provider {
             redirect_uri: config.google.redirect_uri.clone(),
         }));
 
-        let schema = schema::Services::new(database.clone());
+        let schema = schema::Services::new(database.clone(), mailer.clone());
 
         let auth: Arc<dyn Auth> = Arc::new(AuthService::new(
             jwt.clone(),

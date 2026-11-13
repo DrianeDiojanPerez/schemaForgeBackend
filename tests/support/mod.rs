@@ -20,11 +20,15 @@ use schemaforge_backend::module::iam::core::domain::{
 };
 use schemaforge_backend::module::iam::core::ports::{PermissionService, UpdateUser, UserService};
 use schemaforge_backend::module::schema::core::domain::{
-    DomainError, Schema, SchemaDraft, SchemaSummary,
+    Access, Collaborator, DomainError, Grant, Invitation, Schema, SchemaDraft, SchemaSummary,
+    Share, ShareRole, SharedSchema,
 };
-use schemaforge_backend::module::schema::core::ports::SchemaRepository;
+use schemaforge_backend::module::schema::core::ports::{
+    InvitationDraft, SchemaRepository, ShareRepository, UserDirectory,
+};
 use schemaforge_backend::module::{auth, health, iam, schema};
 use schemaforge_backend::package::auth::{Auth, AuthenticationTokens, Identity, Registration};
+use schemaforge_backend::package::emailer::{Emailer, EmailerError};
 use schemaforge_backend::package::errdef::Error;
 use schemaforge_backend::package::pagination::{Data, ListRequest};
 use schemaforge_backend::package::rbac::{Engine, Permission as GrantedPermission};
@@ -344,11 +348,76 @@ impl PermissionService for FakePermissionService {
 #[derive(Default)]
 pub struct FakeSchemaRepository {
     schemas: Mutex<HashMap<String, (Uuid, Schema)>>,
+    shares: Mutex<Vec<Share>>,
+    /// Each invitation beside the digest of its token.
+    invitations: Mutex<Vec<(String, Invitation)>>,
 }
 
 impl FakeSchemaRepository {
     fn read(&self) -> std::sync::MutexGuard<'_, HashMap<String, (Uuid, Schema)>> {
         self.schemas.lock().expect("the store lock should be sound")
+    }
+
+    fn owner_of(&self, id: &str) -> Option<Uuid> {
+        self.read().get(id).map(|(by, _)| *by)
+    }
+
+    fn share_of(&self, schema_id: &str, user_id: Uuid) -> Option<Share> {
+        self.shares
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|share| share.schema_id == schema_id && share.user_id == user_id)
+            .cloned()
+    }
+
+    fn write_share(
+        &self,
+        schema_id: &str,
+        user_id: Uuid,
+        role: ShareRole,
+        shared_by: Uuid,
+    ) -> Share {
+        let mut shares = self.shares.lock().unwrap();
+
+        if let Some(share) = shares
+            .iter_mut()
+            .find(|share| share.schema_id == schema_id && share.user_id == user_id)
+        {
+            share.role = role;
+            share.updated_at = Utc::now();
+            return share.clone();
+        }
+
+        let share = Share {
+            schema_id: schema_id.to_owned(),
+            user_id,
+            role,
+            shared_by,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        shares.push(share.clone());
+
+        share
+    }
+
+    fn take_invitation(&self, id: Uuid) -> Option<Invitation> {
+        let mut invitations = self.invitations.lock().unwrap();
+        let index = invitations
+            .iter()
+            .position(|(_, invitation)| invitation.id == id)?;
+
+        Some(invitations.remove(index).1)
+    }
+
+    pub fn token_of(&self, invitation_id: Uuid) -> Option<String> {
+        self.invitations
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, invitation)| invitation.id == invitation_id)
+            .map(|(token, _)| token.clone())
     }
 
     fn owned_by(schemas: &HashMap<String, (Uuid, Schema)>, owner: Uuid) -> Vec<&Schema> {
@@ -456,14 +525,342 @@ impl SchemaRepository for FakeSchemaRepository {
     }
 }
 
-pub fn fake_schema_services() -> schema::Services {
-    schema::Services::with_repository(Arc::new(FakeSchemaRepository::default()))
+#[async_trait]
+impl ShareRepository for FakeSchemaRepository {
+    async fn grant(&self, caller: Uuid, schema_id: &str) -> Result<Option<Grant>, DomainError> {
+        let Some(owner) = self.owner_of(schema_id) else {
+            return Ok(None);
+        };
+
+        if owner == caller {
+            return Ok(Some(Grant {
+                owner,
+                access: Access::Owner,
+            }));
+        }
+
+        Ok(self.share_of(schema_id, caller).map(|share| Grant {
+            owner,
+            access: Access::Shared(share.role),
+        }))
+    }
+
+    async fn shared_with(
+        &self,
+        caller: Uuid,
+        request: &ListRequest,
+    ) -> Result<(Vec<SharedSchema>, i64), DomainError> {
+        let schemas = self.read();
+        let mut mine: Vec<(Share, SharedSchema)> = self
+            .shares
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|share| share.user_id == caller)
+            .filter_map(|share| {
+                let (owner, schema) = schemas.get(&share.schema_id)?;
+
+                Some((
+                    share.clone(),
+                    SharedSchema {
+                        summary: schema.summary(),
+                        role: share.role,
+                        owner_id: *owner,
+                    },
+                ))
+            })
+            .collect();
+        mine.sort_by(|a, b| {
+            a.0.created_at
+                .cmp(&b.0.created_at)
+                .then(a.0.schema_id.cmp(&b.0.schema_id))
+        });
+        let total = mine.len() as i64;
+
+        Ok((
+            mine.into_iter()
+                .map(|(_, shared)| shared)
+                .skip(request.offset() as usize)
+                .take(request.per_page as usize)
+                .collect(),
+            total,
+        ))
+    }
+
+    async fn shares(&self, schema_id: &str) -> Result<Vec<Share>, DomainError> {
+        Ok(self
+            .shares
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|share| share.schema_id == schema_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn invitations(&self, schema_id: &str) -> Result<Vec<Invitation>, DomainError> {
+        Ok(self
+            .invitations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, invitation)| invitation.schema_id == schema_id)
+            .map(|(_, invitation)| invitation.clone())
+            .collect())
+    }
+
+    async fn create_share(
+        &self,
+        schema_id: &str,
+        user_id: Uuid,
+        role: ShareRole,
+        shared_by: Uuid,
+    ) -> Result<Share, DomainError> {
+        if self.share_of(schema_id, user_id).is_some() {
+            return Err(DomainError::AlreadyShared(user_id.to_string()));
+        }
+
+        Ok(self.write_share(schema_id, user_id, role, shared_by))
+    }
+
+    async fn update_share(
+        &self,
+        schema_id: &str,
+        user_id: Uuid,
+        role: ShareRole,
+    ) -> Result<Share, DomainError> {
+        let shared_by = self
+            .share_of(schema_id, user_id)
+            .ok_or(DomainError::ShareNotFound)?
+            .shared_by;
+
+        Ok(self.write_share(schema_id, user_id, role, shared_by))
+    }
+
+    async fn delete_share(&self, schema_id: &str, user_id: Uuid) -> Result<(), DomainError> {
+        let mut shares = self.shares.lock().unwrap();
+        let before = shares.len();
+        shares.retain(|share| !(share.schema_id == schema_id && share.user_id == user_id));
+
+        if shares.len() == before {
+            return Err(DomainError::ShareNotFound);
+        }
+
+        Ok(())
+    }
+
+    async fn create_invitation(&self, draft: InvitationDraft) -> Result<Invitation, DomainError> {
+        let mut invitations = self.invitations.lock().unwrap();
+
+        if invitations.iter().any(|(_, invitation)| {
+            invitation.schema_id == draft.schema_id && invitation.email == draft.email
+        }) {
+            return Err(DomainError::AlreadyInvited(draft.email));
+        }
+
+        let invitation = Invitation {
+            id: Uuid::new_v4(),
+            schema_id: draft.schema_id,
+            email: draft.email,
+            role: draft.role,
+            invited_by: draft.invited_by,
+            expires_at: draft.expires_at,
+            created_at: Utc::now(),
+        };
+        invitations.push((draft.token_hash, invitation.clone()));
+
+        Ok(invitation)
+    }
+
+    async fn delete_invitation(
+        &self,
+        schema_id: &str,
+        invitation_id: Uuid,
+    ) -> Result<(), DomainError> {
+        let mut invitations = self.invitations.lock().unwrap();
+        let before = invitations.len();
+        invitations.retain(|(_, invitation)| {
+            !(invitation.schema_id == schema_id && invitation.id == invitation_id)
+        });
+
+        if invitations.len() == before {
+            return Err(DomainError::InvitationNotFound);
+        }
+
+        Ok(())
+    }
+
+    async fn find_invitation_by_token(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<Invitation>, DomainError> {
+        Ok(self
+            .invitations
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(token, _)| token == token_hash)
+            .map(|(_, invitation)| invitation.clone()))
+    }
+
+    async fn accept_invitation(
+        &self,
+        invitation_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<Share, DomainError> {
+        let invitation = self
+            .take_invitation(invitation_id)
+            .ok_or(DomainError::InvitationNotFound)?;
+
+        Ok(self.write_share(
+            &invitation.schema_id,
+            user_id,
+            invitation.role,
+            invitation.invited_by,
+        ))
+    }
+
+    async fn claim_invitations(
+        &self,
+        email: &str,
+        user_id: Uuid,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<Vec<Share>, DomainError> {
+        let waiting: Vec<Invitation> = self
+            .invitations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, invitation)| invitation.email.eq_ignore_ascii_case(email))
+            .map(|(_, invitation)| invitation.clone())
+            .collect();
+
+        Ok(waiting
+            .into_iter()
+            .filter_map(|invitation| self.take_invitation(invitation.id))
+            .filter(|invitation| !invitation.is_expired_at(now))
+            .map(|invitation| {
+                self.write_share(
+                    &invitation.schema_id,
+                    user_id,
+                    invitation.role,
+                    invitation.invited_by,
+                )
+            })
+            .collect())
+    }
+}
+
+/// Answered off the fake the sign ups land in, so a person who signed up
+/// can be shared with by address.
+pub struct FakeDirectory {
+    auth: Arc<FakeAuth>,
+}
+
+impl FakeDirectory {
+    fn everyone(&self) -> Vec<Collaborator> {
+        let mut people = vec![self.auth.user.lock().unwrap().clone()];
+        people.extend(self.auth.signed_up.lock().unwrap().iter().cloned());
+
+        people
+            .into_iter()
+            .map(|identity| Collaborator {
+                id: identity.id,
+                email: identity.email.clone(),
+                name: identity.display_name(),
+                avatar_url: identity.avatar_url.clone(),
+            })
+            .collect()
+    }
+}
+
+#[async_trait]
+impl UserDirectory for FakeDirectory {
+    async fn find_by_email(&self, email: &str) -> Result<Option<Collaborator>, DomainError> {
+        Ok(self
+            .everyone()
+            .into_iter()
+            .find(|person| person.email.eq_ignore_ascii_case(email)))
+    }
+
+    async fn find_by_ids(&self, ids: &[Uuid]) -> Result<Vec<Collaborator>, DomainError> {
+        Ok(self
+            .everyone()
+            .into_iter()
+            .filter(|person| ids.contains(&person.id))
+            .collect())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SentMail {
+    pub to: String,
+    pub subject: String,
+    pub template: String,
+    pub data: HashMap<String, String>,
+}
+
+impl SentMail {
+    pub fn token(&self, callback_uri: &str) -> String {
+        self.data["callbackURI"]
+            .strip_prefix(callback_uri)
+            .expect("the link should start with the callback uri")
+            .to_owned()
+    }
+}
+
+#[derive(Default)]
+pub struct RecordingMailer {
+    pub sent: Mutex<Vec<SentMail>>,
+}
+
+impl RecordingMailer {
+    pub fn last(&self) -> SentMail {
+        self.sent
+            .lock()
+            .unwrap()
+            .last()
+            .cloned()
+            .expect("a mail should have been sent")
+    }
+}
+
+#[async_trait]
+impl Emailer for RecordingMailer {
+    async fn send_html(
+        &self,
+        to: &str,
+        subject: &str,
+        template_name: &str,
+        data: HashMap<String, String>,
+    ) -> Result<(), EmailerError> {
+        self.sent.lock().unwrap().push(SentMail {
+            to: to.to_owned(),
+            subject: subject.to_owned(),
+            template: template_name.to_owned(),
+            data,
+        });
+
+        Ok(())
+    }
+}
+
+pub fn fake_schema_services(auth: Arc<FakeAuth>, mailer: Arc<RecordingMailer>) -> schema::Services {
+    let repository = Arc::new(FakeSchemaRepository::default());
+
+    schema::Services::with_repositories(
+        repository.clone(),
+        repository,
+        Arc::new(FakeDirectory { auth }),
+        mailer,
+    )
 }
 
 pub struct TestApp {
     pub router: Router,
     pub calls: Arc<Calls>,
     pub user: Identity,
+    pub mail: Arc<RecordingMailer>,
     auth: Arc<FakeAuth>,
 }
 
@@ -483,6 +880,7 @@ impl TestApp {
 
         let calls = Arc::new(Calls::default());
         let auth = Arc::new(FakeAuth::for_user(identity.clone()));
+        let mail = Arc::new(RecordingMailer::default());
 
         let modules = Modules {
             auth: auth.clone(),
@@ -504,13 +902,14 @@ impl TestApp {
                     }],
                 }),
             },
-            schema: fake_schema_services(),
+            schema: fake_schema_services(auth.clone(), mail.clone()),
         };
 
         Self {
             router: server::router(&modules),
             calls,
             user: identity,
+            mail,
             auth,
         }
     }
@@ -523,6 +922,10 @@ impl TestApp {
     /// about what one person can see of another's.
     pub async fn another_user(&self) -> String {
         another_user(&self.auth).await
+    }
+
+    pub async fn sign_up(&self, email: &str, name: &str) -> String {
+        sign_up(&self.auth, email, name).await
     }
 
     pub async fn send(&self, request: Request<Body>) -> (StatusCode, Value) {
@@ -610,9 +1013,13 @@ impl TestApp {
 }
 
 async fn another_user(auth: &FakeAuth) -> String {
+    sign_up(auth, "stranger@example.com", "Sam Stranger").await
+}
+
+async fn sign_up(auth: &FakeAuth, email: &str, name: &str) -> String {
     auth.register(Registration {
-        name: "Sam Stranger".to_owned(),
-        email: "stranger@example.com".to_owned(),
+        name: name.to_owned(),
+        email: email.to_owned(),
         password: "a-long-enough-password".to_owned(),
     })
     .await
@@ -675,6 +1082,7 @@ pub struct TestServer {
     handle: JoinHandle<()>,
     pub calls: Arc<Calls>,
     pub user: Identity,
+    pub mail: Arc<RecordingMailer>,
     auth: Arc<FakeAuth>,
 }
 
@@ -734,7 +1142,8 @@ impl TestServer {
             calls: calls.clone(),
         });
 
-        let services = fake_schema_services();
+        let mail = Arc::new(RecordingMailer::default());
+        let services = fake_schema_services(fake_auth.clone(), mail.clone());
         let layer = AuthLayer::new(auth.clone(), rbac.clone());
 
         let handle = tokio::spawn(async move {
@@ -753,6 +1162,7 @@ impl TestServer {
             handle,
             calls,
             user: identity,
+            mail,
             auth: fake_auth,
         }
     }
@@ -761,6 +1171,10 @@ impl TestServer {
     /// about what one person can see of another's.
     pub async fn another_user(&self) -> String {
         another_user(&self.auth).await
+    }
+
+    pub async fn sign_up(&self, email: &str, name: &str) -> String {
+        sign_up(&self.auth, email, name).await
     }
 
     async fn channel(&self) -> Channel {
