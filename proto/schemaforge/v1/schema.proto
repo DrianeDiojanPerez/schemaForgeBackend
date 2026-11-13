@@ -105,6 +105,8 @@ message Schema {
   // RFC 3339.
   string created_at = 6;
   string updated_at = 7;
+  // "owner", "editor" or "viewer". Empty on a draft nobody has stored.
+  string access = 8;
 }
 
 // Summary form for list responses, so listing many schemas does not ship every
@@ -341,6 +343,113 @@ message CompareSchemasResponse {
   bool equal = 1;
   repeated ComparisonCounts counts = 2;
   repeated SchemaDifference differences = 3;
+}
+
+enum ShareRole {
+  SHARE_ROLE_UNSPECIFIED = 0;
+  SHARE_ROLE_VIEWER = 1;
+  SHARE_ROLE_EDITOR = 2;
+}
+
+message Collaborator {
+  string id = 1;
+  string email = 2;
+  string name = 3;
+  // The account's picture, or empty when it has none.
+  string avatar_url = 4;
+}
+
+message Member {
+  Collaborator user = 1;
+  ShareRole role = 2;
+  string shared_by = 3;
+  string created_at = 4;
+  string updated_at = 5;
+}
+
+message Invitation {
+  string id = 1;
+  string schema_id = 2;
+  string email = 3;
+  ShareRole role = 4;
+  string invited_by = 5;
+  string expires_at = 6;
+  string created_at = 7;
+}
+
+message SharedSchema {
+  SchemaSummary schema = 1;
+  ShareRole role = 2;
+  Collaborator owner = 3;
+}
+
+message ListSharedSchemasRequest {
+  uint32 page = 1;
+  uint32 per_page = 2;
+}
+
+message ListSharedSchemasResponse {
+  repeated SharedSchema schemas = 1;
+  uint32 page = 2;
+  uint32 per_page = 3;
+  uint64 total = 4;
+}
+
+message ListPeopleRequest {
+  string schema_id = 1;
+}
+
+message ListPeopleResponse {
+  repeated Member members = 1;
+  repeated Invitation invitations = 2;
+}
+
+message ShareSchemaRequest {
+  string schema_id = 1;
+  string email = 2;
+  ShareRole role = 3;
+  // The token is appended to this, the same way a password reset link is
+  // built.
+  string callback_uri = 4;
+}
+
+message ShareSchemaResponse {
+  oneof outcome {
+    Member member = 1;
+    Invitation invitation = 2;
+  }
+}
+
+message ChangeShareRoleRequest {
+  string schema_id = 1;
+  string user_id = 2;
+  ShareRole role = 3;
+}
+
+message ChangeShareRoleResponse {
+  Member member = 1;
+}
+
+message RevokeShareRequest {
+  string schema_id = 1;
+  string user_id = 2;
+}
+
+message RevokeShareResponse {}
+
+message CancelInvitationRequest {
+  string schema_id = 1;
+  string invitation_id = 2;
+}
+
+message CancelInvitationResponse {}
+
+message AcceptInvitationRequest {
+  string token = 1;
+}
+
+message AcceptInvitationResponse {
+  SharedSchema schema = 1;
 }
 
 service SchemaService {

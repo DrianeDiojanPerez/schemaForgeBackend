@@ -9,11 +9,12 @@
 //! one, so a caller fixing a malformed request sees every problem at once.
 
 use crate::module::schema::core::domain::{
-    Attribute, Cardinality, Category, Comparison, DataType, DataTypeKind, Dialect, DifferenceKind,
-    Entity, ExchangeFormat, ForeignKeyRef, Position, Relationship, Schema, SchemaDraft,
-    SchemaSummary, Severity,
+    Access, Attribute, Cardinality, Category, Collaborator, Comparison, DataType, DataTypeKind,
+    Dialect, DifferenceKind, Entity, ExchangeFormat, ForeignKeyRef, Invitation, Position,
+    Relationship, Schema, SchemaDraft, SchemaSummary, Severity, ShareRole,
 };
 use crate::module::schema::core::domain::{Diagnostic, Report};
+use crate::module::schema::core::ports::{Member, SharedListing};
 use crate::package::errdef::Error;
 use crate::rpc::v1;
 
@@ -464,6 +465,71 @@ pub fn schema_to(schema: Schema) -> v1::Schema {
             .collect(),
         created_at: schema.created_at.to_rfc3339(),
         updated_at: schema.updated_at.to_rfc3339(),
+        access: String::new(),
+    }
+}
+
+pub fn opened_to(schema: Schema, access: Access) -> v1::Schema {
+    v1::Schema {
+        access: access.to_string(),
+        ..schema_to(schema)
+    }
+}
+
+/// An unset role is a mistake rather than a default.
+pub fn share_role_from(value: i32) -> Result<ShareRole, Error> {
+    match v1::ShareRole::try_from(value) {
+        Ok(v1::ShareRole::Viewer) => Ok(ShareRole::Viewer),
+        Ok(v1::ShareRole::Editor) => Ok(ShareRole::Editor),
+        _ => Err(Error::validation("failed payload validation")
+            .add_violation("role", "field is required: one of viewer, editor")),
+    }
+}
+
+pub fn share_role_to(role: ShareRole) -> i32 {
+    match role {
+        ShareRole::Viewer => v1::ShareRole::Viewer,
+        ShareRole::Editor => v1::ShareRole::Editor,
+    }
+    .into()
+}
+
+pub fn collaborator_to(person: Collaborator) -> v1::Collaborator {
+    v1::Collaborator {
+        id: person.id.to_string(),
+        email: person.email,
+        name: person.name,
+        avatar_url: person.avatar_url.unwrap_or_default(),
+    }
+}
+
+pub fn member_to(member: Member) -> v1::Member {
+    v1::Member {
+        user: Some(collaborator_to(member.user)),
+        role: share_role_to(member.share.role),
+        shared_by: member.share.shared_by.to_string(),
+        created_at: member.share.created_at.to_rfc3339(),
+        updated_at: member.share.updated_at.to_rfc3339(),
+    }
+}
+
+pub fn invitation_to(invitation: Invitation) -> v1::Invitation {
+    v1::Invitation {
+        id: invitation.id.to_string(),
+        schema_id: invitation.schema_id,
+        email: invitation.email,
+        role: share_role_to(invitation.role),
+        invited_by: invitation.invited_by.to_string(),
+        expires_at: invitation.expires_at.to_rfc3339(),
+        created_at: invitation.created_at.to_rfc3339(),
+    }
+}
+
+pub fn shared_to(listing: SharedListing) -> v1::SharedSchema {
+    v1::SharedSchema {
+        schema: Some(summary_to(listing.summary)),
+        role: share_role_to(listing.role),
+        owner: Some(collaborator_to(listing.owner)),
     }
 }
 
@@ -821,5 +887,27 @@ mod tests {
         assert_eq!(returned.name, schema.name);
         assert_eq!(returned.entities, schema.entities);
         assert_eq!(returned.relationships, schema.relationships);
+    }
+
+    #[test]
+    fn a_share_role_has_to_be_named() {
+        assert_eq!(
+            share_role_from(v1::ShareRole::Editor as i32).expect("editor is a role"),
+            ShareRole::Editor
+        );
+        assert_eq!(
+            share_role_from(v1::ShareRole::Unspecified as i32)
+                .expect_err("unspecified is not a role")
+                .app_code(),
+            code::VALIDATION_FAILED
+        );
+        assert_eq!(
+            share_role_from(99).expect_err("neither is 99").app_code(),
+            code::VALIDATION_FAILED
+        );
+        assert_eq!(
+            share_role_from(share_role_to(ShareRole::Viewer)).expect("it should map back"),
+            ShareRole::Viewer
+        );
     }
 }
