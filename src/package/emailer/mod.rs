@@ -7,10 +7,20 @@ use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 
 use crate::config::Mail;
 
-const TEMPLATES: &[(&str, &str)] = &[(
-    "password-reset",
-    include_str!("templates/password-reset.html"),
-)];
+const TEMPLATES: &[(&str, &str)] = &[
+    (
+        "password-reset",
+        include_str!("templates/password-reset.html"),
+    ),
+    (
+        "schema-invitation",
+        include_str!("templates/schema-invitation.html"),
+    ),
+    (
+        "schema-shared",
+        include_str!("templates/schema-shared.html"),
+    ),
+];
 
 #[derive(Debug, thiserror::Error)]
 pub enum EmailerError {
@@ -111,6 +121,47 @@ mod tests {
 
         assert!(body.contains("Hey admin,"));
         assert!(body.contains("https://example.com/reset?token=abc"));
+        assert!(!body.contains("{{"));
+    }
+
+    #[test]
+    fn an_invitation_names_who_shared_what_and_where_to_go() {
+        let data = HashMap::from([
+            ("inviter".to_owned(), "Ada Lovelace".to_owned()),
+            ("avatar".to_owned(), "AL".to_owned()),
+            ("schemaName".to_owned(), "Course Registration".to_owned()),
+            ("role".to_owned(), "editor".to_owned()),
+            (
+                "callbackURI".to_owned(),
+                "https://example.com/invitations/abc".to_owned(),
+            ),
+        ]);
+
+        let body = SmtpEmailer::render("schema-invitation", &data).expect("template should render");
+
+        assert!(body.contains("Ada Lovelace invited you"));
+        assert!(body.contains(">AL</td>"));
+        assert!(body.contains(">Course Registration</strong>"));
+        assert!(body.contains("with editor access."));
+        assert!(body.contains("https://example.com/invitations/abc"));
+        assert!(!body.contains("{{"));
+    }
+
+    #[test]
+    fn a_shared_mail_says_what_they_can_do_now_and_where() {
+        let data = HashMap::from([
+            ("inviter".to_owned(), "Ada Lovelace".to_owned()),
+            ("avatar".to_owned(), "AL".to_owned()),
+            ("schemaName".to_owned(), "Course Registration".to_owned()),
+            ("verb".to_owned(), "edit".to_owned()),
+            ("appURI".to_owned(), "https://example.com/".to_owned()),
+        ]);
+
+        let body = SmtpEmailer::render("schema-shared", &data).expect("template should render");
+
+        assert!(body.contains("Ada Lovelace shared a schema with you"));
+        assert!(body.contains("You can now edit <strong"));
+        assert!(body.contains("href=\"https://example.com/\""));
         assert!(!body.contains("{{"));
     }
 
