@@ -61,6 +61,15 @@ info:
     Members of the super role, `Admin` unless the server is configured
     otherwise, bypass every permission check.
 
+    ## Sharing
+
+    A schema belongs to the person who made it. The owner can share it with
+    other people one at a time, each as a `viewer` or an `editor`, the way a
+    document is shared. An address with an account gets access at once; one
+    without is sent an invitation by email that works for seven days, and is
+    claimed automatically when that address signs up. Every schema response
+    says what the caller may do with it in `access`.
+
 servers:
   - url: http://localhost:3000
     description: Local development
@@ -76,6 +85,8 @@ tags:
     description: The permissions the system knows about.
   - name: Schemas
     description: Storing, validating and generating from database designs.
+  - name: Sharing
+    description: Who else may open a schema, and as what.
 
 paths:
   /v1/healthcheck:
@@ -791,6 +802,257 @@ paths:
         "422":
           $ref: "#/components/responses/ValidationFailed"
 
+  /v1/schemas/shared-with-me:
+    get:
+      tags: [Sharing]
+      summary: List the schemas others shared with me
+      description: |
+        Summaries of every schema someone else let the caller in on, each
+        with the caller's role on it and who owns it. The caller's own
+        schemas are listed by `GET /v1/schemas` instead.
+      parameters:
+        - { name: page, in: query, schema: { type: integer, default: 1 } }
+        - { name: per_page, in: query, schema: { type: integer, default: 10 } }
+      responses:
+        "200":
+          description: A page of shared schemas.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/SharedSchema" }
+                      pagination: { $ref: "#/components/schemas/Pagination" }
+
+  /v1/schemas/{schema-id}/people:
+    parameters:
+      - name: schema-id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [Sharing]
+      summary: List who has access and who is invited
+      description: Anyone with access sees the members. Only the owner also sees the invitations still open.
+      responses:
+        "200":
+          description: Everyone with access, and every invitation still open.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          members:
+                            type: array
+                            items: { $ref: "#/components/schemas/Member" }
+                          invitations:
+                            type: array
+                            items: { $ref: "#/components/schemas/Invitation" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/schemas/{schema-id}/shares:
+    parameters:
+      - name: schema-id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [Sharing]
+      summary: Share with an address
+      description: |
+        Owner only. An address with an account is granted access now and
+        comes back as `member`. One without is sent an invitation by email
+        and comes back as `invitation`; the link in the mail is
+        `callback_uri` with the token appended, and it works for seven days.
+        Sharing with an address that already has access, or is already
+        invited, is a conflict: change their role or cancel the invitation
+        instead.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ShareRequest" }
+      responses:
+        "200":
+          description: What sharing came to.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          member:
+                            oneOf:
+                              - $ref: "#/components/schemas/Member"
+                              - type: "null"
+                          invitation:
+                            oneOf:
+                              - $ref: "#/components/schemas/Invitation"
+                              - type: "null"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+
+  /v1/schemas/{schema-id}/shares/{user-id}:
+    parameters:
+      - name: schema-id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+      - name: user-id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    patch:
+      tags: [Sharing]
+      summary: Change someone's role
+      description: Owner only.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role: { $ref: "#/components/schemas/ShareRole" }
+      responses:
+        "200":
+          description: The member with their new role.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/Member" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+    delete:
+      tags: [Sharing]
+      summary: Take someone's access away
+      description: |
+        The owner may remove anyone. Anyone may remove themselves, which is
+        how a person leaves a schema they were let in on.
+      responses:
+        "200":
+          description: The share was removed.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          message: { type: string }
+                          schema_id: { type: string }
+                          user_id: { type: string }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/schemas/{schema-id}/invitations/{invitation-id}:
+    parameters:
+      - name: schema-id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+      - name: invitation-id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    delete:
+      tags: [Sharing]
+      summary: Cancel an invitation
+      description: Owner only. The link in the email stops working.
+      responses:
+        "200":
+          description: The invitation was cancelled.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          message: { type: string }
+                          schema_id: { type: string }
+                          invitation_id: { type: string }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/invitations/{token}/accept:
+    parameters:
+      - name: token
+        in: path
+        required: true
+        description: The token at the end of the link in the email.
+        schema: { type: string }
+    post:
+      tags: [Sharing]
+      summary: Open an invitation link
+      description: |
+        The caller has to be signed in as the address the invitation went
+        to. A link works once; opening it again is a not found. An
+        invitation older than seven days answers 400 and is cleared, so the
+        owner can share again. Signing up with the invited address claims
+        every open invitation without opening any link.
+      responses:
+        "200":
+          description: The schema the caller now has access to.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data: { $ref: "#/components/schemas/SharedSchema" }
+        "400":
+          description: The invitation has expired.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Envelope" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
   /v1/schemas/{schema-id}:
     parameters:
       - name: schema-id
@@ -1003,6 +1265,12 @@ components:
             id: { type: string, format: uuid }
             created_at: { type: string, format: date-time }
             updated_at: { type: string, format: date-time }
+            access:
+              type: string
+              enum: [owner, editor, viewer]
+              description: |
+                What the caller may do with it. Absent on a draft nobody has
+                stored yet.
 
     SchemaSummary:
       type: object
@@ -1015,6 +1283,68 @@ components:
         relationship_count: { type: integer }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+
+    ShareRole:
+      type: string
+      enum: [viewer, editor]
+      description: |
+        What a person a schema is shared with may do. A viewer reads,
+        validates, generates and exports; an editor also replaces the
+        drawing. Only the owner shares or deletes.
+
+    Collaborator:
+      type: object
+      description: Someone a schema can be shared with, as the sharing screen shows them.
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        name: { type: string }
+        avatar_url: { type: string, format: uri, nullable: true }
+
+    Member:
+      type: object
+      description: Someone with access now.
+      properties:
+        user: { $ref: "#/components/schemas/Collaborator" }
+        role: { $ref: "#/components/schemas/ShareRole" }
+        shared_by: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    Invitation:
+      type: object
+      description: |
+        Access waiting on someone who has no account yet. It turns into a
+        member the moment they sign up with this address or open the link.
+      properties:
+        id: { type: string, format: uuid }
+        schema_id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        role: { $ref: "#/components/schemas/ShareRole" }
+        invited_by: { type: string, format: uuid }
+        expires_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+
+    SharedSchema:
+      allOf:
+        - $ref: "#/components/schemas/SchemaSummary"
+        - type: object
+          description: A schema someone else let the caller in on.
+          properties:
+            role: { $ref: "#/components/schemas/ShareRole" }
+            owner: { $ref: "#/components/schemas/Collaborator" }
+
+    ShareRequest:
+      type: object
+      required: [email, role, callback_uri]
+      properties:
+        email: { type: string, format: email, examples: ["cat@example.com"] }
+        role: { $ref: "#/components/schemas/ShareRole" }
+        callback_uri:
+          type: string
+          format: uri
+          description: Where the invitation link points. The token is appended to it.
+          examples: ["https://app.example.com/invitations/"]
 
     Entity:
       type: object

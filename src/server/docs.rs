@@ -142,6 +142,12 @@ mod tests {
             "/v1/schemas/export",
             "/v1/schemas/import",
             "/v1/schemas/{schema-id}",
+            "/v1/schemas/shared-with-me",
+            "/v1/schemas/{schema-id}/people",
+            "/v1/schemas/{schema-id}/shares",
+            "/v1/schemas/{schema-id}/shares/{user-id}",
+            "/v1/schemas/{schema-id}/invitations/{invitation-id}",
+            "/v1/invitations/{token}/accept",
         ] {
             assert!(
                 SPEC.contains(&format!("\n  {route}:\n")),
