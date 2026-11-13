@@ -575,3 +575,376 @@ impl SharingService for SharingServiceImpl {
         .await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::sync::Mutex;
+
+    use chrono::DateTime;
+
+    use crate::module::schema::core::domain::{Access, Entity, Schema, SchemaDraft, SchemaSummary};
+    use crate::module::schema::core::service::fake_shares::{FakeDirectory, FakeShares};
+    use crate::package::emailer::EmailerError;
+    use crate::package::errdef::code;
+
+    const CALLBACK: &str = "https://app.test/invitations/";
+
+    fn owner() -> Uuid {
+        Uuid::from_u128(1)
+    }
+
+    fn bob() -> Uuid {
+        Uuid::from_u128(2)
+    }
+
+    fn stranger() -> Uuid {
+        Uuid::from_u128(3)
+    }
+
+    fn now() -> DateTime<Utc> {
+        DateTime::from_timestamp(1_700_000_000, 0).expect("a fixed instant")
+    }
+
+    fn person(id: Uuid, email: &str, name: &str) -> Collaborator {
+        Collaborator {
+            id,
+            email: email.to_owned(),
+            name: name.to_owned(),
+            avatar_url: None,
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeSchemas {
+        schemas: Mutex<Vec<(Uuid, Schema)>>,
+    }
+
+    impl FakeSchemas {
+        fn holding(owner: Uuid, schemas: Vec<Schema>) -> Self {
+            Self {
+                schemas: Mutex::new(schemas.into_iter().map(|schema| (owner, schema)).collect()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl SchemaRepository for FakeSchemas {
+        async fn index(
+            &self,
+            owner: Uuid,
+            _request: &ListRequest,
+        ) -> Result<(Vec<SchemaSummary>, i64), DomainError> {
+            let mine: Vec<SchemaSummary> = self
+                .schemas
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(by, _)| *by == owner)
+                .map(|(_, schema)| schema.summary())
+                .collect();
+            let total = mine.len() as i64;
+
+            Ok((mine, total))
+        }
+
+        async fn create(&self, _owner: Uuid, _draft: SchemaDraft) -> Result<Schema, DomainError> {
+            unimplemented!("sharing never creates a schema")
+        }
+
+        async fn find_by_id(&self, owner: Uuid, id: &str) -> Result<Option<Schema>, DomainError> {
+            Ok(self
+                .schemas
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(by, schema)| *by == owner && schema.id == id)
+                .map(|(_, schema)| schema.clone()))
+        }
+
+        async fn find_by_name(
+            &self,
+            _owner: Uuid,
+            _name: &str,
+        ) -> Result<Option<Schema>, DomainError> {
+            unimplemented!("sharing never looks a schema up by name")
+        }
+
+        async fn replace(
+            &self,
+            _owner: Uuid,
+            _id: &str,
+            _draft: SchemaDraft,
+        ) -> Result<Schema, DomainError> {
+            unimplemented!("sharing never replaces a schema")
+        }
+
+        async fn delete(&self, _owner: Uuid, _id: &str) -> Result<(), DomainError> {
+            unimplemented!("sharing never deletes a schema")
+        }
+    }
+
+    type Sent = (String, String, HashMap<String, String>);
+
+    #[derive(Default)]
+    struct FakeMailer {
+        sent: Mutex<Vec<Sent>>,
+        down: bool,
+    }
+
+    impl FakeMailer {
+        fn down() -> Self {
+            Self {
+                sent: Mutex::default(),
+                down: true,
+            }
+        }
+
+        fn last(&self) -> Sent {
+            self.sent
+                .lock()
+                .unwrap()
+                .last()
+                .cloned()
+                .expect("a mail should have been sent")
+        }
+    }
+
+    #[async_trait]
+    impl Emailer for FakeMailer {
+        async fn send_html(
+            &self,
+            to: &str,
+            subject: &str,
+            _template_name: &str,
+            data: HashMap<String, String>,
+        ) -> Result<(), EmailerError> {
+            if self.down {
+                return Err(EmailerError::TemplateNotFound("smtp is down".to_owned()));
+            }
+
+            self.sent
+                .lock()
+                .unwrap()
+                .push((to.to_owned(), subject.to_owned(), data));
+
+            Ok(())
+        }
+    }
+
+    fn stored(id: &str, name: &str) -> Schema {
+        Schema::new(
+            id,
+            SchemaDraft {
+                name: name.to_owned(),
+                description: String::new(),
+                entities: vec![Entity::new("e1", "users")],
+                relationships: Vec::new(),
+            },
+            now(),
+        )
+    }
+
+    struct World {
+        schemas: Arc<FakeSchemas>,
+        shares: Arc<FakeShares>,
+        mailer: Arc<FakeMailer>,
+        service: SharingServiceImpl,
+    }
+
+    /// The owner holds "blog" and "shop"; bob has an account and the
+    /// stranger has one too, while cat@example.com has none.
+    async fn world_with(mailer: FakeMailer) -> World {
+        let schemas = Arc::new(FakeSchemas::holding(
+            owner(),
+            vec![stored("s1", "blog"), stored("s2", "shop")],
+        ));
+        let shares = Arc::new(FakeShares::default());
+        shares.mirror(owner(), schemas.as_ref()).await;
+        let mailer = Arc::new(mailer);
+
+        let service = SharingServiceImpl::new(
+            schemas.clone(),
+            shares.clone(),
+            Arc::new(FakeDirectory::knowing(vec![
+                person(owner(), "ada@example.com", "Ada Lovelace"),
+                person(bob(), "bob@example.com", "Bob Builder"),
+                person(stranger(), "sam@example.com", "Sam Stranger"),
+            ])),
+            mailer.clone(),
+        );
+
+        World {
+            schemas,
+            shares,
+            mailer,
+            service,
+        }
+    }
+
+    async fn world() -> World {
+        world_with(FakeMailer::default()).await
+    }
+
+    fn share_with(email: &str, role: ShareRole) -> ShareRequest {
+        ShareRequest {
+            email: email.to_owned(),
+            role,
+            callback_uri: CALLBACK.to_owned(),
+        }
+    }
+
+    #[test]
+    fn the_badge_is_the_picture_when_there_is_one_and_the_initials_otherwise() {
+        assert_eq!(avatar(None, "Ada Lovelace"), "AL");
+        assert_eq!(avatar(Some("  "), "Ada Lovelace"), "AL");
+        assert_eq!(
+            avatar(Some("http://plain.example/a.png"), "Ada Lovelace"),
+            "AL"
+        );
+        let tag = avatar(Some("https://lh3.example/a=s96\"<"), "Ada Lovelace");
+        assert!(tag.starts_with("<img src=\"https://lh3.example/a=s96&quot;&lt;\""));
+        assert!(!tag.contains("AL"));
+    }
+
+    #[test]
+    fn initials_come_from_the_name_or_failing_that_the_address() {
+        assert_eq!(initials("Ada Lovelace"), "AL");
+        assert_eq!(initials("ada"), "A");
+        assert_eq!(initials("  bob  builder  jr "), "BB");
+        assert_eq!(initials("cat@example.com"), "CE");
+    }
+
+    #[tokio::test]
+    async fn sharing_with_someone_who_has_an_account_grants_access_now() {
+        let world = world().await;
+
+        let shared = world
+            .service
+            .share(
+                owner(),
+                "s1",
+                share_with(" Bob@Example.com ", ShareRole::Editor),
+            )
+            .await
+            .expect("the share should succeed");
+
+        let Shared::Granted(member) = shared else {
+            panic!("an address with an account is granted, not invited");
+        };
+
+        assert_eq!(member.user.name, "Bob Builder");
+        assert_eq!(member.share.role, ShareRole::Editor);
+        assert_eq!(
+            world
+                .shares
+                .grant(bob(), "s1")
+                .await
+                .expect("the lookup should succeed")
+                .map(|grant| grant.access),
+            Some(Access::Shared(ShareRole::Editor))
+        );
+
+        let (to, subject, data) = world.mailer.last();
+
+        assert_eq!(to, "bob@example.com");
+        assert_eq!(subject, "Ada Lovelace shared \"blog\" with you");
+        assert_eq!(data["inviter"], "Ada Lovelace");
+        assert_eq!(data["verb"], "edit");
+        assert_eq!(data["appURI"], "https://app.test/");
+        assert!(!data.contains_key("callbackURI"), "a member needs no token");
+    }
+
+    #[tokio::test]
+    async fn a_shared_mail_that_did_not_leave_does_not_undo_the_share() {
+        let world = world_with(FakeMailer::down()).await;
+
+        let shared = world
+            .service
+            .share(
+                owner(),
+                "s1",
+                share_with("bob@example.com", ShareRole::Viewer),
+            )
+            .await
+            .expect("the share should stand even when the mail fails");
+
+        assert!(matches!(shared, Shared::Granted(_)));
+    }
+
+    #[test]
+    fn the_app_is_the_origin_of_the_invitation_link() {
+        assert_eq!(
+            app_uri("https://app.test/invitations/"),
+            "https://app.test/"
+        );
+        assert_eq!(
+            app_uri("http://localhost:3100/invitations/"),
+            "http://localhost:3100/"
+        );
+        assert_eq!(app_uri("https://app.test"), "https://app.test/");
+    }
+
+    #[tokio::test]
+    async fn sharing_with_an_address_nobody_has_sends_an_invitation() {
+        let world = world().await;
+
+        let shared = world
+            .service
+            .share(
+                owner(),
+                "s1",
+                share_with("cat@example.com", ShareRole::Viewer),
+            )
+            .await
+            .expect("the share should succeed");
+
+        let Shared::Invited(invitation) = shared else {
+            panic!("an address without an account is invited");
+        };
+
+        assert_eq!(invitation.email, "cat@example.com");
+        assert_eq!(invitation.role, ShareRole::Viewer);
+
+        let (to, subject, data) = world.mailer.last();
+
+        assert_eq!(to, "cat@example.com");
+        assert_eq!(subject, "Ada Lovelace shared \"blog\" with you");
+        assert_eq!(data["schemaName"], "blog");
+        assert_eq!(data["inviter"], "Ada Lovelace");
+        assert_eq!(data["initials"], "AL");
+        assert_eq!(data["role"], "viewer");
+        assert!(
+            data["callbackURI"].starts_with(CALLBACK),
+            "the link goes where the caller said: {}",
+            data["callbackURI"]
+        );
+        assert_ne!(
+            Some(data["callbackURI"][CALLBACK.len()..].to_owned()),
+            world.shares.token_of(invitation.id),
+            "the token in the mail is not the digest that was stored"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_invitation_nobody_received_is_taken_back() {
+        let world = world_with(FakeMailer::down()).await;
+
+        let error = world
+            .service
+            .share(
+                owner(),
+                "s1",
+                share_with("cat@example.com", ShareRole::Viewer),
+            )
+            .await
+            .expect_err("the share should fail");
+
+        assert_eq!(error.app_code(), code::UNKNOWN);
+        assert!(
+            world.shares.invitations_for("cat@example.com").is_empty(),
+            "the owner can try again once mail is back"
+        );
+    }
+}
