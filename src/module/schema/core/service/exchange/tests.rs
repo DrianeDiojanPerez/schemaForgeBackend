@@ -443,13 +443,12 @@ fn a_column_in_the_key_comes_back_unique() {
     assert!(students.attributes[0].unique, "the key implies it");
     assert!(!students.attributes[1].unique);
 
-    // Neither column of a composite key is unique on its own, but the model
-    // has no way to say "part of the key" other than this flag, and SQL
-    // cannot tell the two readings apart.
+    // Neither column of a composite key is unique on its own, which is how
+    // the verifier reads them too, so the flag stays off unless written.
     let enrollments = &draft.entities[1];
 
-    assert!(enrollments.attributes[0].unique);
-    assert!(enrollments.attributes[1].unique);
+    assert!(!enrollments.attributes[0].unique);
+    assert!(!enrollments.attributes[1].unique);
 }
 
 #[test]

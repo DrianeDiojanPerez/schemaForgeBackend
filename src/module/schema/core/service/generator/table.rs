@@ -3,7 +3,16 @@ use crate::module::schema::core::domain::{Attribute, Entity};
 use super::quote;
 
 pub(super) fn create_table(entity: &Entity) -> String {
-    let mut lines: Vec<String> = entity.attributes.iter().map(column).collect();
+    let key_columns = entity
+        .attributes
+        .iter()
+        .filter(|attribute| attribute.primary_key)
+        .count();
+    let mut lines: Vec<String> = entity
+        .attributes
+        .iter()
+        .map(|attribute| column(attribute, key_columns == 1))
+        .collect();
 
     if let Some(constraint) = primary_key(entity) {
         lines.push(constraint);
@@ -20,7 +29,7 @@ pub(super) fn create_table(entity: &Entity) -> String {
     )
 }
 
-fn column(attribute: &Attribute) -> String {
+fn column(attribute: &Attribute, single_key: bool) -> String {
     let mut line = format!(
         "{} {}",
         quote(&attribute.name),
@@ -39,8 +48,9 @@ fn column(attribute: &Attribute) -> String {
     }
 
     // The key is declared once at the foot of the table, so a column that is
-    // only unique by virtue of being the key does not say so twice.
-    if attribute.unique && !attribute.primary_key {
+    // only unique by virtue of being the key does not say so twice. One
+    // column of a composite key is not, so there the word is written.
+    if attribute.unique && !(attribute.primary_key && single_key) {
         line.push_str(" UNIQUE");
     }
 

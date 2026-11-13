@@ -227,6 +227,12 @@ fn comment(tokens: &[scan::Token]) -> Option<Comment> {
 }
 
 fn entity_from(parsed: &ParsedTable) -> Entity {
+    let key_columns = parsed
+        .columns
+        .iter()
+        .filter(|column| column.primary_key)
+        .count();
+
     Entity::new(fresh("e"), &parsed.name).with_attributes(
         parsed
             .columns
@@ -236,10 +242,11 @@ fn entity_from(parsed: &ParsedTable) -> Entity {
 
                 attribute.nullable = column.nullable;
                 attribute.primary_key = column.primary_key;
-                // The generator leaves UNIQUE off a key column because the
-                // key already says it, so the flag is put back rather than
-                // read off a script that had no reason to carry it.
-                attribute.unique = column.unique || column.primary_key;
+                // The generator leaves UNIQUE off a one-column key because the
+                // key already says it, so the flag is put back. One column of
+                // a composite key is not unique on its own, as the verifier
+                // reads it, so there it has to be written.
+                attribute.unique = column.unique || (column.primary_key && key_columns == 1);
                 attribute.default_value = column.default_value.clone();
 
                 attribute
