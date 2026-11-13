@@ -16,13 +16,16 @@ use schemaforge_backend::module::iam::core::ports::{
     PermissionRepository, UpdateUser, UserRepository, UserService,
 };
 use schemaforge_backend::module::iam::core::service::UserServiceImpl;
-use schemaforge_backend::module::schema::adapter::repository::PgSchemaRepository;
+use schemaforge_backend::module::schema::adapter::repository::{
+    PgSchemaRepository, PgShareRepository, PgUserDirectory,
+};
 use schemaforge_backend::module::schema::core::domain::{
-    Attribute, Cardinality, DataType, DataTypeKind, DomainError as SchemaError, Entity,
-    ForeignKeyRef, Position, Relationship, Schema, SchemaDraft, SchemaSummary,
+    Access, Attribute, Cardinality, DataType, DataTypeKind, DomainError as SchemaError, Entity,
+    ForeignKeyRef, Position, Relationship, Schema, SchemaDraft, SchemaSummary, ShareRole,
 };
 use schemaforge_backend::module::schema::core::ports::{
-    GenerateOptions, Generator, SchemaRepository, Verifier,
+    GenerateOptions, Generator, InvitationDraft, SchemaRepository, ShareRepository, UserDirectory,
+    Verifier,
 };
 use schemaforge_backend::module::schema::core::service::{PostgresGenerator, SchemaVerifier};
 use schemaforge_backend::package::auth::{NewUser, PostgresAuthStore, Store as AuthStore};
@@ -70,6 +73,8 @@ struct Fixture {
     users: PgUserRepository,
     permissions: PgPermissionRepository,
     schemas: PgSchemaRepository,
+    shares: PgShareRepository,
+    directory: PgUserDirectory,
     tag: String,
 }
 
@@ -81,6 +86,8 @@ impl Fixture {
             users: PgUserRepository::new(db.clone()),
             permissions: PgPermissionRepository::new(db.clone()),
             schemas: PgSchemaRepository::new(db.clone()),
+            shares: PgShareRepository::new(db.clone()),
+            directory: PgUserDirectory::new(db.clone()),
             tag: Uuid::new_v4().simple().to_string()[..12].to_owned(),
             db,
         }
@@ -1453,4 +1460,402 @@ async fn a_live_postgres_accepts_the_generated_ddl() {
         .execute(&mut *conn)
         .await
         .expect("the scratch namespace should be dropped");
+}
+
+// ──── Share repository ──────────────────────────────────
+
+impl Fixture {
+    async fn a_stored_schema(&self, owner: Uuid, name: &str) -> Schema {
+        self.schemas
+            .create(owner, self.a_new_schema(name))
+            .await
+            .expect("the insert should succeed")
+    }
+
+    fn an_invitation(&self, schema: &Schema, email: &str, by: Uuid) -> InvitationDraft {
+        InvitationDraft {
+            schema_id: schema.id.clone(),
+            email: email.to_owned(),
+            role: ShareRole::Editor,
+            token_hash: format!("hash-{}-{email}", schema.id),
+            invited_by: by,
+            expires_at: Utc::now() + chrono::Duration::days(7),
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_grant_says_who_owns_a_schema_and_what_the_caller_may_do() {
+    let fx = database!();
+    let owner = fx.an_owner();
+    let viewer = fx.an_owner();
+    let schema = fx.a_stored_schema(owner, "granted").await;
+
+    let owned = fx
+        .shares
+        .grant(owner, &schema.id)
+        .await
+        .expect("the lookup should succeed")
+        .expect("the owner has a grant");
+
+    assert_eq!(owned.owner, owner);
+    assert_eq!(owned.access, Access::Owner);
+    assert!(
+        fx.shares
+            .grant(viewer, &schema.id)
+            .await
+            .expect("the lookup should succeed")
+            .is_none(),
+        "someone with no part in the schema gets nothing"
+    );
+
+    fx.shares
+        .create_share(&schema.id, viewer, ShareRole::Viewer, owner)
+        .await
+        .expect("the share should be written");
+
+    let shared = fx
+        .shares
+        .grant(viewer, &schema.id)
+        .await
+        .expect("the lookup should succeed")
+        .expect("the viewer has a grant now");
+
+    assert_eq!(shared.owner, owner, "a grant always names the owner");
+    assert_eq!(shared.access, Access::Shared(ShareRole::Viewer));
+    assert!(
+        fx.shares
+            .grant(owner, "not-a-uuid")
+            .await
+            .expect("the lookup should succeed")
+            .is_none(),
+        "an id that is not a uuid names nothing"
+    );
+}
+
+#[tokio::test]
+async fn a_share_is_written_once_changed_in_place_and_gone_when_deleted() {
+    let fx = database!();
+    let owner = fx.an_owner();
+    let bob = fx.an_owner();
+    let schema = fx.a_stored_schema(owner, "shared").await;
+
+    let share = fx
+        .shares
+        .create_share(&schema.id, bob, ShareRole::Viewer, owner)
+        .await
+        .expect("the share should be written");
+
+    assert_eq!(share.schema_id, schema.id);
+    assert_eq!(share.shared_by, owner);
+    assert!(matches!(
+        fx.shares
+            .create_share(&schema.id, bob, ShareRole::Editor, owner)
+            .await
+            .expect_err("one row per person"),
+        SchemaError::AlreadyShared(_)
+    ));
+
+    let changed = fx
+        .shares
+        .update_share(&schema.id, bob, ShareRole::Editor)
+        .await
+        .expect("the role should change");
+
+    assert_eq!(changed.role, ShareRole::Editor);
+    assert_eq!(changed.created_at, share.created_at);
+    assert!(changed.updated_at >= share.updated_at);
+    assert_eq!(
+        fx.shares
+            .shares(&schema.id)
+            .await
+            .expect("the listing should succeed")
+            .len(),
+        1
+    );
+
+    fx.shares
+        .delete_share(&schema.id, bob)
+        .await
+        .expect("the share should be deleted");
+
+    assert!(matches!(
+        fx.shares
+            .delete_share(&schema.id, bob)
+            .await
+            .expect_err("there is nothing left"),
+        SchemaError::ShareNotFound
+    ));
+    assert!(matches!(
+        fx.shares
+            .update_share(&schema.id, bob, ShareRole::Viewer)
+            .await
+            .expect_err("there is nothing to change"),
+        SchemaError::ShareNotFound
+    ));
+}
+
+#[tokio::test]
+async fn shared_with_lists_a_persons_shares_in_the_order_they_were_given() {
+    let fx = database!();
+    let ada = fx.an_owner();
+    let ben = fx.an_owner();
+    let bob = fx.an_owner();
+    let first = fx.a_stored_schema(ada, "first").await;
+    let second = fx.a_stored_schema(ben, "second").await;
+    let _unshared = fx.a_stored_schema(ada, "private").await;
+
+    for (schema, by) in [(&first, ada), (&second, ben)] {
+        fx.shares
+            .create_share(&schema.id, bob, ShareRole::Viewer, by)
+            .await
+            .expect("the share should be written");
+    }
+
+    let (page, total) = fx
+        .shares
+        .shared_with(bob, &ListRequest::paged(1, 1))
+        .await
+        .expect("the listing should succeed");
+
+    assert_eq!(total, 2);
+    assert_eq!(page.len(), 1, "the page is capped at the page size");
+    assert_eq!(page[0].summary.name, first.name);
+    assert_eq!(page[0].summary.entity_count, 2);
+    assert_eq!(page[0].owner_id, ada);
+    assert_eq!(page[0].role, ShareRole::Viewer);
+
+    let (rest, _) = fx
+        .shares
+        .shared_with(bob, &ListRequest::paged(2, 1))
+        .await
+        .expect("the listing should succeed");
+
+    assert_eq!(rest[0].owner_id, ben);
+}
+
+#[tokio::test]
+async fn an_invitation_turns_into_a_share_once_and_only_once() {
+    let fx = database!();
+    let owner = fx.an_owner();
+    let cat = fx.an_owner();
+    let schema = fx.a_stored_schema(owner, "invited").await;
+    let draft = fx.an_invitation(&schema, "cat@test.local", owner);
+
+    let invitation = fx
+        .shares
+        .create_invitation(draft.clone())
+        .await
+        .expect("the invitation should be written");
+
+    assert_eq!(invitation.email, "cat@test.local");
+    assert_eq!(invitation.role, ShareRole::Editor);
+    assert!(matches!(
+        fx.shares
+            .create_invitation(draft.clone())
+            .await
+            .expect_err("one invitation per address per schema"),
+        SchemaError::AlreadyInvited(_)
+    ));
+    assert_eq!(
+        fx.shares
+            .find_invitation_by_token(&draft.token_hash)
+            .await
+            .expect("the lookup should succeed")
+            .map(|found| found.id),
+        Some(invitation.id)
+    );
+    assert_eq!(
+        fx.shares
+            .invitations(&schema.id)
+            .await
+            .expect("the listing should succeed")
+            .len(),
+        1
+    );
+
+    let share = fx
+        .shares
+        .accept_invitation(invitation.id, cat)
+        .await
+        .expect("accepting should succeed");
+
+    assert_eq!(share.role, ShareRole::Editor);
+    assert_eq!(share.shared_by, owner, "the share remembers who invited");
+    assert!(
+        fx.shares
+            .find_invitation_by_token(&draft.token_hash)
+            .await
+            .expect("the lookup should succeed")
+            .is_none(),
+        "the invitation is consumed"
+    );
+    assert!(matches!(
+        fx.shares
+            .accept_invitation(invitation.id, cat)
+            .await
+            .expect_err("a link works once"),
+        SchemaError::InvitationNotFound
+    ));
+}
+
+#[tokio::test]
+async fn an_invitation_can_be_taken_back() {
+    let fx = database!();
+    let owner = fx.an_owner();
+    let schema = fx.a_stored_schema(owner, "cancelled").await;
+
+    let invitation = fx
+        .shares
+        .create_invitation(fx.an_invitation(&schema, "cat@test.local", owner))
+        .await
+        .expect("the invitation should be written");
+
+    fx.shares
+        .delete_invitation(&schema.id, invitation.id)
+        .await
+        .expect("the invitation should be deleted");
+
+    assert!(matches!(
+        fx.shares
+            .delete_invitation(&schema.id, invitation.id)
+            .await
+            .expect_err("there is nothing left"),
+        SchemaError::InvitationNotFound
+    ));
+}
+
+#[tokio::test]
+async fn claiming_takes_every_live_invitation_for_an_address_and_drops_the_dead_ones() {
+    let fx = database!();
+    let owner = fx.an_owner();
+    let cat = fx.an_owner();
+    let live = fx.a_stored_schema(owner, "live").await;
+    let dead = fx.a_stored_schema(owner, "dead").await;
+    let email = format!("cat_{}@test.local", fx.tag);
+
+    fx.shares
+        .create_invitation(fx.an_invitation(&live, &email, owner))
+        .await
+        .expect("the invitation should be written");
+    fx.shares
+        .create_invitation(InvitationDraft {
+            expires_at: Utc::now() - chrono::Duration::days(1),
+            ..fx.an_invitation(&dead, &email, owner)
+        })
+        .await
+        .expect("the invitation should be written");
+
+    let shares = fx
+        .shares
+        .claim_invitations(&email.to_uppercase(), cat, Utc::now())
+        .await
+        .expect("claiming should succeed");
+
+    assert_eq!(shares.len(), 1, "only the live invitation becomes a share");
+    assert_eq!(shares[0].schema_id, live.id);
+    assert!(fx
+        .shares
+        .invitations(&live.id)
+        .await
+        .expect("the listing should succeed")
+        .is_empty());
+    assert!(
+        fx.shares
+            .invitations(&dead.id)
+            .await
+            .expect("the listing should succeed")
+            .is_empty(),
+        "the expired one is cleared rather than left waiting"
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_schema_takes_its_shares_and_invitations_with_it() {
+    let fx = database!();
+    let owner = fx.an_owner();
+    let bob = fx.an_owner();
+    let schema = fx.a_stored_schema(owner, "cascaded").await;
+
+    fx.shares
+        .create_share(&schema.id, bob, ShareRole::Viewer, owner)
+        .await
+        .expect("the share should be written");
+    fx.shares
+        .create_invitation(fx.an_invitation(&schema, "cat@test.local", owner))
+        .await
+        .expect("the invitation should be written");
+
+    fx.schemas
+        .delete(owner, &schema.id)
+        .await
+        .expect("the delete should succeed");
+
+    assert!(fx
+        .shares
+        .grant(bob, &schema.id)
+        .await
+        .expect("the lookup should succeed")
+        .is_none());
+    assert_eq!(
+        fx.shares
+            .shared_with(bob, &ListRequest::default())
+            .await
+            .expect("the listing should succeed")
+            .1,
+        0
+    );
+    assert!(fx
+        .shares
+        .invitations(&schema.id)
+        .await
+        .expect("the listing should succeed")
+        .is_empty());
+}
+
+// ──── User directory ──────────────────────────────────
+
+#[tokio::test]
+async fn the_directory_names_people_by_address_and_by_id_but_not_the_deleted() {
+    let fx = database!();
+
+    let bob = fx.a_new_user("directory_bob");
+    let bob_id = fx.insert(&bob).await;
+    let mut gone = fx.a_new_user("directory_gone");
+    gone.status = DELETED_USER_STATUS;
+    let gone_id = fx.insert(&gone).await;
+
+    let found = fx
+        .directory
+        .find_by_email(&bob.email.to_uppercase())
+        .await
+        .expect("the lookup should succeed")
+        .expect("bob is in the directory");
+
+    assert_eq!(found.id, bob_id);
+    assert_eq!(found.email, bob.email);
+    assert_eq!(found.name, "Test User");
+    assert!(
+        fx.directory
+            .find_by_email(&gone.email)
+            .await
+            .expect("the lookup should succeed")
+            .is_none(),
+        "a deleted account cannot be shared with"
+    );
+
+    let people = fx
+        .directory
+        .find_by_ids(&[bob_id, gone_id, Uuid::new_v4()])
+        .await
+        .expect("the lookup should succeed");
+
+    assert_eq!(people.len(), 1);
+    assert_eq!(people[0].id, bob_id);
+    assert!(fx
+        .directory
+        .find_by_ids(&[])
+        .await
+        .expect("nothing asked, nothing answered")
+        .is_empty());
 }
