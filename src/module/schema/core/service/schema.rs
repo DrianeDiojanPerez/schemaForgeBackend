@@ -1250,4 +1250,147 @@ mod tests {
         assert_eq!(generated.app_code(), code::NOT_FOUND);
         assert_eq!(exported.app_code(), code::NOT_FOUND);
     }
+
+    #[tokio::test]
+    async fn a_viewer_can_read_a_shared_schema_but_not_change_it() {
+        let repository = Arc::new(FakeRepository::holding(vec![stored("s1", "blog")]));
+        repository
+            .create_share("s1", someone_else(), ShareRole::Viewer, caller())
+            .await
+            .expect("the share should be written");
+        let service = service_on(repository);
+
+        assert_eq!(
+            service
+                .find_by_id(someone_else(), "s1")
+                .await
+                .expect("a viewer may read")
+                .name,
+            "blog"
+        );
+        assert_eq!(
+            service
+                .replace(someone_else(), "s1", draft("renamed"))
+                .await
+                .expect_err("a viewer may not write")
+                .app_code(),
+            code::FORBIDDEN
+        );
+        assert_eq!(
+            service
+                .delete(someone_else(), "s1")
+                .await
+                .expect_err("a viewer may not delete")
+                .app_code(),
+            code::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn an_editor_can_change_a_shared_schema_but_not_delete_it() {
+        let repository = Arc::new(FakeRepository::holding(vec![stored("s1", "blog")]));
+        repository
+            .create_share("s1", someone_else(), ShareRole::Editor, caller())
+            .await
+            .expect("the share should be written");
+        let service = service_on(repository);
+
+        let schema = service
+            .replace(someone_else(), "s1", draft("renamed"))
+            .await
+            .expect("an editor may write");
+
+        assert_eq!(schema.name, "renamed");
+        assert_eq!(
+            service
+                .delete(someone_else(), "s1")
+                .await
+                .expect_err("an editor may not delete")
+                .app_code(),
+            code::FORBIDDEN
+        );
+        assert_eq!(
+            service
+                .find_by_id(caller(), "s1")
+                .await
+                .expect("the owner still reads it")
+                .name,
+            "renamed",
+            "the edit landed on the owner's schema"
+        );
+    }
+
+    #[tokio::test]
+    async fn access_names_what_the_caller_may_do() {
+        let repository = Arc::new(FakeRepository::holding(vec![stored("s1", "blog")]));
+        repository
+            .create_share("s1", someone_else(), ShareRole::Viewer, caller())
+            .await
+            .expect("the share should be written");
+        let service = service_on(repository);
+
+        assert_eq!(
+            service.access(caller(), "s1").await.expect("the owner"),
+            Access::Owner
+        );
+        assert_eq!(
+            service
+                .access(someone_else(), "s1")
+                .await
+                .expect("the viewer"),
+            Access::Shared(ShareRole::Viewer)
+        );
+        assert_eq!(
+            service
+                .access(Uuid::from_u128(3), "s1")
+                .await
+                .expect_err("a stranger")
+                .app_code(),
+            code::NOT_FOUND,
+            "someone with no part in a schema cannot tell it exists"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sign_up_claims_every_invitation_waiting_on_its_address() {
+        let repository = Arc::new(FakeRepository::holding(vec![
+            stored("s1", "blog"),
+            stored("s2", "shop"),
+        ]));
+        for (schema_id, role) in [("s1", ShareRole::Viewer), ("s2", ShareRole::Editor)] {
+            repository
+                .create_invitation(InvitationDraft {
+                    schema_id: schema_id.to_owned(),
+                    email: "cat@example.com".to_owned(),
+                    role,
+                    token_hash: format!("hash-{schema_id}"),
+                    invited_by: caller(),
+                    expires_at: Utc::now() + chrono::Duration::days(7),
+                })
+                .await
+                .expect("the invitation should be written");
+        }
+        let service = service_on(repository.clone());
+
+        let claimed = service
+            .claim_invitations(someone_else(), "cat@example.com")
+            .await
+            .expect("the claim should succeed");
+
+        assert_eq!(claimed, 2);
+        assert_eq!(
+            service
+                .access(someone_else(), "s2")
+                .await
+                .expect("the editor invitation became a share"),
+            Access::Shared(ShareRole::Editor)
+        );
+        assert!(
+            repository
+                .shares
+                .invitations_for("cat@example.com")
+                .is_empty(),
+            "nothing is left waiting"
+        );
+    }
 }
