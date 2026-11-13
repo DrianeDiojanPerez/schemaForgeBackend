@@ -282,7 +282,7 @@ impl SharingServiceImpl {
             .mailer
             .send_html(
                 &email,
-                &format!("{inviter} shared \"{}\" with you", schema.name),
+                &format!("SchemaForge: {inviter} invited you to {}", schema.name),
                 INVITATION_TEMPLATE,
                 data,
             )
@@ -422,17 +422,16 @@ impl SharingService for SharingServiceImpl {
                 .map_err(to_error)?
                 .ok_or_else(|| Error::not_found("schema does not exist"))?;
 
+            let verb = match share.role {
+                ShareRole::Editor => "edit",
+                ShareRole::Viewer => "view",
+            };
+
             let data = HashMap::from([
                 ("schemaName".to_owned(), schema.name.clone()),
                 ("inviter".to_owned(), sharer.clone()),
                 ("avatar".to_owned(), avatar(picture.as_deref(), &sharer)),
-                (
-                    "verb".to_owned(),
-                    match share.role {
-                        ShareRole::Editor => "edit".to_owned(),
-                        ShareRole::Viewer => "view".to_owned(),
-                    },
-                ),
+                ("verb".to_owned(), verb.to_owned()),
                 ("appURI".to_owned(), app_uri(&request.callback_uri)),
             ]);
 
@@ -440,7 +439,7 @@ impl SharingService for SharingServiceImpl {
                 .mailer
                 .send_html(
                     &person.email,
-                    &format!("{sharer} shared \"{}\" with you", schema.name),
+                    &format!("SchemaForge: you can now {verb} {}", schema.name),
                     SHARED_TEMPLATE,
                     data,
                 )
@@ -849,7 +848,7 @@ mod tests {
         let (to, subject, data) = world.mailer.last();
 
         assert_eq!(to, "bob@example.com");
-        assert_eq!(subject, "Ada Lovelace shared \"blog\" with you");
+        assert_eq!(subject, "SchemaForge: you can now edit blog");
         assert_eq!(data["inviter"], "Ada Lovelace");
         assert_eq!(data["verb"], "edit");
         assert_eq!(data["appURI"], "https://app.test/");
@@ -910,7 +909,7 @@ mod tests {
         let (to, subject, data) = world.mailer.last();
 
         assert_eq!(to, "cat@example.com");
-        assert_eq!(subject, "Ada Lovelace shared \"blog\" with you");
+        assert_eq!(subject, "SchemaForge: Ada Lovelace invited you to blog");
         assert_eq!(data["schemaName"], "blog");
         assert_eq!(data["inviter"], "Ada Lovelace");
         assert_eq!(data["initials"], "AL");

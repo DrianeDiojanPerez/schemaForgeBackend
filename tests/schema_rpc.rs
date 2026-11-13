@@ -1201,7 +1201,10 @@ async fn an_invitation_goes_out_by_mail_and_is_accepted_by_the_invited_address()
     let mail = server.mail.last();
 
     assert_eq!(mail.to, "cat@example.com");
-    assert_eq!(mail.subject, "App Admin shared \"invited\" with you");
+    assert_eq!(
+        mail.subject,
+        "SchemaForge: App Admin invited you to invited"
+    );
 
     let people = owner
         .list_people(v1::ListPeopleRequest {

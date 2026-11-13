@@ -1170,7 +1170,10 @@ async fn an_address_without_an_account_is_invited_by_mail_and_lets_itself_in() {
 
     assert_eq!(mail.to, "cat@example.com");
     assert_eq!(mail.template, "schema-invitation");
-    assert_eq!(mail.subject, "App Admin shared \"invited\" with you");
+    assert_eq!(
+        mail.subject,
+        "SchemaForge: App Admin invited you to invited"
+    );
     assert_eq!(mail.data["role"], "editor");
 
     let (_, body) = app
