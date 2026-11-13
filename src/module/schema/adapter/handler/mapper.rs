@@ -11,6 +11,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::module::schema::core::domain::{self as domain};
+use crate::module::schema::core::ports;
 use crate::package::errdef::Error;
 
 /// Collects field violations under dotted paths so a client can point at the
@@ -161,6 +162,42 @@ impl Schema {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct Collaborator {
+    pub id: String,
+    pub email: String,
+    pub name: String,
+    pub avatar_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Member {
+    pub user: Collaborator,
+    pub role: String,
+    pub shared_by: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Invitation {
+    pub id: String,
+    pub schema_id: String,
+    pub email: String,
+    pub role: String,
+    pub invited_by: String,
+    pub expires_at: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SharedSchema {
+    #[serde(flatten)]
+    pub summary: SchemaSummary,
+    pub role: String,
+    pub owner: Collaborator,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct SchemaSummary {
     pub id: String,
     pub name: String,
@@ -267,6 +304,71 @@ impl From<domain::Schema> for Schema {
             created_at: schema.created_at.to_rfc3339(),
             updated_at: schema.updated_at.to_rfc3339(),
             access: None,
+        }
+    }
+}
+
+impl From<domain::Collaborator> for Collaborator {
+    fn from(person: domain::Collaborator) -> Self {
+        Self {
+            id: person.id.to_string(),
+            email: person.email,
+            name: person.name,
+            avatar_url: person.avatar_url,
+        }
+    }
+}
+
+impl From<ports::Member> for Member {
+    fn from(member: ports::Member) -> Self {
+        Self {
+            user: member.user.into(),
+            role: member.share.role.to_string(),
+            shared_by: member.share.shared_by.to_string(),
+            created_at: member.share.created_at.to_rfc3339(),
+            updated_at: member.share.updated_at.to_rfc3339(),
+        }
+    }
+}
+
+impl From<domain::Invitation> for Invitation {
+    fn from(invitation: domain::Invitation) -> Self {
+        Self {
+            id: invitation.id.to_string(),
+            schema_id: invitation.schema_id,
+            email: invitation.email,
+            role: invitation.role.to_string(),
+            invited_by: invitation.invited_by.to_string(),
+            expires_at: invitation.expires_at.to_rfc3339(),
+            created_at: invitation.created_at.to_rfc3339(),
+        }
+    }
+}
+
+impl From<ports::SharedListing> for SharedSchema {
+    fn from(listing: ports::SharedListing) -> Self {
+        Self {
+            summary: listing.summary.into(),
+            role: listing.role.to_string(),
+            owner: listing.owner.into(),
+        }
+    }
+}
+
+pub fn share_role_from(
+    value: Option<&str>,
+    path: &str,
+    violations: &mut Violations,
+) -> Option<domain::ShareRole> {
+    match value.map(str::parse) {
+        Some(Ok(role)) => Some(role),
+        Some(Err(())) => {
+            violations.add(path, "field must be one of: viewer, editor");
+            None
+        }
+        None => {
+            violations.add(path, "field is required: one of viewer, editor");
+            None
         }
     }
 }
