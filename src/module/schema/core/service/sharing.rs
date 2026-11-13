@@ -301,3 +301,277 @@ impl SharingServiceImpl {
         Ok(invitation)
     }
 }
+
+#[async_trait]
+impl SharingService for SharingServiceImpl {
+    #[tracing::instrument(name = "SharingService.SharedWithMe", skip_all)]
+    async fn shared_with_me(
+        &self,
+        caller: Uuid,
+        request: ListRequest,
+    ) -> Result<Data<SharedListing>, Error> {
+        let (shared, total) = self
+            .shares
+            .shared_with(caller, &request)
+            .await
+            .map_err(to_error)?;
+
+        let owners = self
+            .people_by_id(shared.iter().map(|entry| entry.owner_id).collect())
+            .await?;
+
+        let listings = shared
+            .into_iter()
+            .map(|entry| SharedListing {
+                owner: owners
+                    .get(&entry.owner_id)
+                    .cloned()
+                    .unwrap_or_else(|| unnamed(entry.owner_id)),
+                summary: entry.summary,
+                role: entry.role,
+            })
+            .collect();
+
+        tracing::debug!(total, "shared schemas listed");
+
+        Ok(Data::new(listings, total, request.page, request.per_page))
+    }
+
+    #[tracing::instrument(name = "SharingService.People", skip_all, fields(schema.id = %schema_id))]
+    async fn people(&self, caller: Uuid, schema_id: &str) -> Result<People, Error> {
+        let grant = self.grant(caller, schema_id).await?;
+
+        let shares = self.shares.shares(schema_id).await.map_err(to_error)?;
+        // Who else is in is anyone's to see, the way a shared file names its
+        // people. Who has been asked and not yet answered is the owner's.
+        let invitations = if grant.access.is_owner() {
+            self.shares.invitations(schema_id).await.map_err(to_error)?
+        } else {
+            Vec::new()
+        };
+
+        let users = self
+            .people_by_id(shares.iter().map(|share| share.user_id).collect())
+            .await?;
+
+        let members = shares
+            .into_iter()
+            .map(|share| Member {
+                user: users
+                    .get(&share.user_id)
+                    .cloned()
+                    .unwrap_or_else(|| unnamed(share.user_id)),
+                share,
+            })
+            .collect();
+
+        Ok(People {
+            members,
+            invitations,
+        })
+    }
+
+    #[tracing::instrument(name = "SharingService.Share", skip_all, fields(schema.id = %schema_id))]
+    async fn share(
+        &self,
+        caller: Uuid,
+        schema_id: &str,
+        request: ShareRequest,
+    ) -> Result<Shared, Error> {
+        Self::check_share(&request)?;
+
+        let grant = self.owned(caller, schema_id).await?;
+        let email = clean_email(&request.email);
+
+        let Some(person) = self
+            .directory
+            .find_by_email(&email)
+            .await
+            .map_err(to_error)?
+        else {
+            return Ok(Shared::Invited(
+                self.invite(caller, grant, schema_id, request, email)
+                    .await?,
+            ));
+        };
+
+        if person.id == caller {
+            return Err(Error::validation("failed payload validation")
+                .add_violation("email", "a schema cannot be shared with its owner"));
+        }
+
+        let share = self
+            .shares
+            .create_share(schema_id, person.id, request.role, caller)
+            .await
+            .map_err(|failure| match failure {
+                DomainError::AlreadyShared(_) => to_error(DomainError::AlreadyShared(email)),
+                other => to_error(other),
+            })?;
+
+        tracing::info!(user.id = %person.id, role = %share.role, "schema shared");
+
+        // They already have the schema, so a mail that never left changes
+        // nothing: it is logged and the share stands.
+        if !person.email.is_empty() {
+            let (sharer, picture) = self.sender(caller).await?;
+            let schema = self
+                .schemas
+                .find_by_id(grant.owner, schema_id)
+                .await
+                .map_err(to_error)?
+                .ok_or_else(|| Error::not_found("schema does not exist"))?;
+
+            let data = HashMap::from([
+                ("schemaName".to_owned(), schema.name.clone()),
+                ("inviter".to_owned(), sharer.clone()),
+                ("avatar".to_owned(), avatar(picture.as_deref(), &sharer)),
+                (
+                    "verb".to_owned(),
+                    match share.role {
+                        ShareRole::Editor => "edit".to_owned(),
+                        ShareRole::Viewer => "view".to_owned(),
+                    },
+                ),
+                ("appURI".to_owned(), app_uri(&request.callback_uri)),
+            ]);
+
+            if let Err(failure) = self
+                .mailer
+                .send_html(
+                    &person.email,
+                    &format!("{sharer} shared \"{}\" with you", schema.name),
+                    SHARED_TEMPLATE,
+                    data,
+                )
+                .await
+            {
+                tracing::warn!(error = %failure, "the shared mail did not leave");
+            }
+        }
+
+        Ok(Shared::Granted(Member {
+            share,
+            user: person,
+        }))
+    }
+
+    #[tracing::instrument(name = "SharingService.ChangeRole", skip_all, fields(schema.id = %schema_id))]
+    async fn change_role(
+        &self,
+        caller: Uuid,
+        schema_id: &str,
+        user_id: Uuid,
+        role: ShareRole,
+    ) -> Result<Member, Error> {
+        self.owned(caller, schema_id).await?;
+
+        let share = self
+            .shares
+            .update_share(schema_id, user_id, role)
+            .await
+            .map_err(to_error)?;
+
+        tracing::info!(%user_id, %role, "share role changed");
+
+        self.member(share).await
+    }
+
+    #[tracing::instrument(name = "SharingService.Revoke", skip_all, fields(schema.id = %schema_id))]
+    async fn revoke(&self, caller: Uuid, schema_id: &str, user_id: Uuid) -> Result<(), Error> {
+        let grant = self.grant(caller, schema_id).await?;
+
+        // Giving up one's own access takes no permission. Taking someone
+        // else's does.
+        if user_id != caller && !grant.access.is_owner() {
+            return Err(Error::forbidden("only the owner may share this schema"));
+        }
+
+        self.shares
+            .delete_share(schema_id, user_id)
+            .await
+            .map_err(to_error)?;
+
+        tracing::info!(%user_id, "share revoked");
+
+        Ok(())
+    }
+
+    #[tracing::instrument(name = "SharingService.CancelInvitation", skip_all, fields(schema.id = %schema_id))]
+    async fn cancel_invitation(
+        &self,
+        caller: Uuid,
+        schema_id: &str,
+        invitation_id: Uuid,
+    ) -> Result<(), Error> {
+        self.owned(caller, schema_id).await?;
+
+        self.shares
+            .delete_invitation(schema_id, invitation_id)
+            .await
+            .map_err(to_error)?;
+
+        tracing::info!(%invitation_id, "invitation cancelled");
+
+        Ok(())
+    }
+
+    #[tracing::instrument(name = "SharingService.AcceptInvitation", skip_all)]
+    async fn accept_invitation(&self, caller: Uuid, token: &str) -> Result<SharedListing, Error> {
+        let invitation = self
+            .shares
+            .find_invitation_by_token(&crypto::hash_token(token))
+            .await
+            .map_err(to_error)?
+            .ok_or_else(|| Error::not_found("invitation does not exist"))?;
+
+        if invitation.is_expired_at(Utc::now()) {
+            self.shares
+                .delete_invitation(&invitation.schema_id, invitation.id)
+                .await
+                .map_err(to_error)?;
+
+            return Err(Error::bad_request("invitation has expired"));
+        }
+
+        // The link is only good for the address it went to, so a forwarded
+        // email does not hand the schema to whoever opens it.
+        let person = self
+            .people_by_id(vec![caller])
+            .await?
+            .remove(&caller)
+            .ok_or_else(|| Error::unauthorized("the caller is not a known user"))?;
+
+        if !person.email.eq_ignore_ascii_case(&invitation.email) {
+            return Err(Error::forbidden(
+                "this invitation was sent to another address",
+            ));
+        }
+
+        let share = self
+            .shares
+            .accept_invitation(invitation.id, caller)
+            .await
+            .map_err(to_error)?;
+
+        let grant = self.grant(caller, &share.schema_id).await?;
+        let schema = self
+            .schemas
+            .find_by_id(grant.owner, &share.schema_id)
+            .await
+            .map_err(to_error)?
+            .ok_or_else(|| Error::not_found("schema does not exist"))?;
+
+        tracing::info!(schema.id = %share.schema_id, role = %share.role, "invitation accepted");
+
+        self.listing_of(
+            caller,
+            SharedSchema {
+                summary: schema.summary(),
+                role: share.role,
+                owner_id: grant.owner,
+            },
+        )
+        .await
+    }
+}
