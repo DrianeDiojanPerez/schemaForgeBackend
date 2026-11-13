@@ -43,13 +43,19 @@ fn access_for(path: &str) -> Access {
     };
 
     match method {
-        "GetSchema" | "ListSchemas" | "ValidateSchema" | "CompareSchemas" | "GenerateDdl"
-        | "ExportSchema" => Access::Requires("Schemas.View All"),
+        "GetSchema" | "ListSchemas" | "ListSharedSchemas" | "ValidateSchema" | "CompareSchemas"
+        | "GenerateDdl" | "ExportSchema" => Access::Requires("Schemas.View All"),
         // Importing stores nothing, but the only reason to read a file is
         // to make a schema out of it, so it needs the same permission.
         "CreateSchema" | "ImportSchema" => Access::Requires("Schemas.Create"),
-        "UpdateSchema" => Access::Requires("Schemas.Update"),
+        // Who else may open a schema is part of what the schema is, and the
+        // owner check inside the service does the rest.
+        "UpdateSchema" | "ListPeople" | "ShareSchema" | "ChangeShareRole" | "RevokeShare"
+        | "CancelInvitation" => Access::Requires("Schemas.Update"),
         "DeleteSchema" => Access::Requires("Schemas.Delete"),
+        // Whoever was invited may let themselves in; the service checks it
+        // is the address the invitation went to.
+        "AcceptInvitation" => Access::Authenticated,
         // A method added to the service and left off this list answers denied
         // rather than open.
         _ => Access::Denied,
@@ -255,6 +261,31 @@ mod tests {
             action("/schemaforge.v1.SchemaService/DeleteSchema"),
             Some("Schemas.Delete")
         );
+    }
+
+    #[test]
+    fn sharing_is_changing_a_schema_and_accepting_only_needs_a_token() {
+        assert_eq!(
+            action("/schemaforge.v1.SchemaService/ListSharedSchemas"),
+            Some("Schemas.View All")
+        );
+        for method in [
+            "ListPeople",
+            "ShareSchema",
+            "ChangeShareRole",
+            "RevokeShare",
+            "CancelInvitation",
+        ] {
+            assert_eq!(
+                action(&format!("/schemaforge.v1.SchemaService/{method}")),
+                Some("Schemas.Update"),
+                "{method}"
+            );
+        }
+        assert!(matches!(
+            access_for("/schemaforge.v1.SchemaService/AcceptInvitation"),
+            Access::Authenticated
+        ));
     }
 
     #[test]
