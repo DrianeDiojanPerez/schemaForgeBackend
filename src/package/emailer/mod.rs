@@ -1,25 +1,34 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use lettre::message::header::{ContentType, MIME_VERSION_1_0};
+use lettre::message::MultiPart;
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 
 use crate::config::{Mail, MailEncryption};
 
-const TEMPLATES: &[(&str, &str)] = &[
-    (
-        "password-reset",
-        include_str!("templates/password-reset.html"),
-    ),
-    (
-        "schema-invitation",
-        include_str!("templates/schema-invitation.html"),
-    ),
-    (
-        "schema-shared",
-        include_str!("templates/schema-shared.html"),
-    ),
+struct Template {
+    name: &'static str,
+    html: &'static str,
+    text: &'static str,
+}
+
+const TEMPLATES: &[Template] = &[
+    Template {
+        name: "password-reset",
+        html: include_str!("templates/password-reset.html"),
+        text: include_str!("templates/password-reset.txt"),
+    },
+    Template {
+        name: "schema-invitation",
+        html: include_str!("templates/schema-invitation.html"),
+        text: include_str!("templates/schema-invitation.txt"),
+    },
+    Template {
+        name: "schema-shared",
+        html: include_str!("templates/schema-shared.html"),
+        text: include_str!("templates/schema-shared.txt"),
+    },
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -74,29 +83,46 @@ impl SmtpEmailer {
         })
     }
 
-    fn render(template_name: &str, data: &HashMap<String, String>) -> Result<String, EmailerError> {
-        let template = TEMPLATES
+    fn template(name: &str) -> Result<&'static Template, EmailerError> {
+        TEMPLATES
             .iter()
-            .find(|(name, _)| *name == template_name)
-            .map(|(_, body)| *body)
-            .ok_or_else(|| EmailerError::TemplateNotFound(template_name.to_owned()))?;
-
-        Ok(data.iter().fold(template.to_owned(), |body, (key, value)| {
-            body.replace(&format!("{{{{{key}}}}}"), value)
-        }))
+            .find(|template| template.name == name)
+            .ok_or_else(|| EmailerError::TemplateNotFound(name.to_owned()))
     }
 
-    // Gmail takes a mail without these two headers and then quietly drops
-    // it, so the sender sees a success and the inbox never sees the mail.
-    fn message(from: &str, to: &str, subject: &str, body: String) -> Result<Message, EmailerError> {
+    fn fill(body: &str, data: &HashMap<String, String>) -> String {
+        data.iter().fold(body.to_owned(), |body, (key, value)| {
+            body.replace(&format!("{{{{{key}}}}}"), value)
+        })
+    }
+
+    fn render(template_name: &str, data: &HashMap<String, String>) -> Result<String, EmailerError> {
+        Ok(Self::fill(Self::template(template_name)?.html, data))
+    }
+
+    fn render_text(
+        template_name: &str,
+        data: &HashMap<String, String>,
+    ) -> Result<String, EmailerError> {
+        Ok(Self::fill(Self::template(template_name)?.text, data))
+    }
+
+    // Gmail takes a mail with no MIME version or message id and quietly
+    // drops it, and it counts a mail with no plain text part as spam, so
+    // every mail goes out with both headers and both parts.
+    fn message(
+        from: &str,
+        to: &str,
+        subject: &str,
+        text: String,
+        html: String,
+    ) -> Result<Message, EmailerError> {
         Ok(Message::builder()
             .from(from.parse()?)
             .to(to.parse()?)
             .subject(subject)
             .message_id(None)
-            .header(MIME_VERSION_1_0)
-            .header(ContentType::TEXT_HTML)
-            .body(body)?)
+            .multipart(MultiPart::alternative_plain_html(text, html))?)
     }
 }
 
@@ -109,10 +135,11 @@ impl Emailer for SmtpEmailer {
         template_name: &str,
         data: HashMap<String, String>,
     ) -> Result<(), EmailerError> {
-        let body = Self::render(template_name, &data)?;
+        let html = Self::render(template_name, &data)?;
+        let text = Self::render_text(template_name, &data)?;
 
         self.transport
-            .send(Self::message(&self.from, to, subject, body)?)
+            .send(Self::message(&self.from, to, subject, text, html)?)
             .await?;
 
         Ok(())
@@ -187,6 +214,7 @@ mod tests {
             "SchemaForge <noreply@example.com>",
             "sam@example.com",
             "Hello",
+            "hi in text".to_owned(),
             "<p>hi</p>".to_owned(),
         )
         .expect("the message should build");
@@ -199,11 +227,60 @@ mod tests {
     }
 
     #[test]
+    fn a_message_carries_a_plain_text_part_beside_the_html() {
+        let message = SmtpEmailer::message(
+            "SchemaForge <noreply@example.com>",
+            "sam@example.com",
+            "Hello",
+            "hi in text".to_owned(),
+            "<p>hi</p>".to_owned(),
+        )
+        .expect("the message should build");
+
+        let raw = String::from_utf8(message.formatted()).expect("the message should be text");
+
+        assert!(
+            raw.contains("Content-Type: multipart/alternative;"),
+            "{raw}"
+        );
+        assert!(raw.contains("Content-Type: text/plain; charset=utf-8\r\n"));
+        assert!(raw.contains("hi in text"));
+        assert!(raw.contains("<p>hi</p>"));
+    }
+
+    #[test]
+    fn every_template_has_a_text_version_with_the_same_link_and_no_markup() {
+        let data = HashMap::from([
+            ("username".to_owned(), "admin".to_owned()),
+            ("inviter".to_owned(), "Ada Lovelace".to_owned()),
+            ("avatar".to_owned(), "<img src=\"x\">".to_owned()),
+            ("schemaName".to_owned(), "Course Registration".to_owned()),
+            ("role".to_owned(), "editor".to_owned()),
+            ("verb".to_owned(), "edit".to_owned()),
+            ("appURI".to_owned(), "https://example.com/".to_owned()),
+            (
+                "callbackURI".to_owned(),
+                "https://example.com/go".to_owned(),
+            ),
+        ]);
+
+        for template in TEMPLATES {
+            let text = SmtpEmailer::render_text(template.name, &data)
+                .expect("the text version should render");
+
+            assert!(text.contains("https://example.com/"), "{}", template.name);
+            assert!(!text.contains("{{"), "{}: {text}", template.name);
+            assert!(!text.contains('<'), "{}: {text}", template.name);
+        }
+    }
+
+    #[test]
     fn a_message_to_an_address_that_is_not_one_is_refused() {
         assert!(SmtpEmailer::message(
             "SchemaForge <noreply@example.com>",
             "not an address",
             "Hello",
+            String::new(),
             String::new(),
         )
         .is_err());

@@ -1,0 +1,7 @@
+{{inviter}} invited you to {{schemaName}} with {{role}} access.
+
+Open the invitation: {{callbackURI}}
+
+Valid for seven days, for this address only.
+
+SchemaForge. This is an automated message, please do not reply.

@@ -1,0 +1,9 @@
+{{inviter}} shared a schema with you
+
+You can now {{verb}} {{schemaName}}. It is waiting under Shared with me.
+
+Open SchemaForge: {{appURI}}
+
+Sign in with this address to see it.
+
+SchemaForge. This is an automated message, please do not reply.
