@@ -947,4 +947,303 @@ mod tests {
             "the owner can try again once mail is back"
         );
     }
+
+    #[tokio::test]
+    async fn only_the_owner_shares() {
+        let world = world().await;
+        world
+            .shares
+            .create_share("s1", bob(), ShareRole::Editor, owner())
+            .await
+            .expect("the share should be written");
+
+        assert_eq!(
+            world
+                .service
+                .share(
+                    bob(),
+                    "s1",
+                    share_with("sam@example.com", ShareRole::Viewer)
+                )
+                .await
+                .expect_err("an editor may not share")
+                .app_code(),
+            code::FORBIDDEN
+        );
+        assert_eq!(
+            world
+                .service
+                .share(
+                    stranger(),
+                    "s1",
+                    share_with("bob@example.com", ShareRole::Viewer)
+                )
+                .await
+                .expect_err("a stranger cannot tell the schema exists")
+                .app_code(),
+            code::NOT_FOUND
+        );
+        assert_eq!(
+            world
+                .service
+                .people(stranger(), "s1")
+                .await
+                .expect_err("a stranger cannot list who is in either")
+                .app_code(),
+            code::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn a_member_sees_who_else_is_in_but_not_who_is_still_invited() {
+        let world = world().await;
+
+        world
+            .service
+            .share(
+                owner(),
+                "s1",
+                share_with("bob@example.com", ShareRole::Editor),
+            )
+            .await
+            .expect("the share should succeed");
+        world
+            .service
+            .share(
+                owner(),
+                "s1",
+                share_with("cat@example.com", ShareRole::Viewer),
+            )
+            .await
+            .expect("the invitation should succeed");
+
+        let people = world
+            .service
+            .people(bob(), "s1")
+            .await
+            .expect("a member may list who is in");
+
+        assert_eq!(people.members.len(), 1);
+        assert_eq!(people.members[0].user.name, "Bob Builder");
+        assert!(
+            people.invitations.is_empty(),
+            "invitations are the owner's to see"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_schema_cannot_be_shared_with_its_owner_or_with_nothing() {
+        let world = world().await;
+
+        let with_self = world
+            .service
+            .share(
+                owner(),
+                "s1",
+                share_with("ada@example.com", ShareRole::Viewer),
+            )
+            .await
+            .expect_err("the owner already has it");
+        let with_nothing = world
+            .service
+            .share(
+                owner(),
+                "s1",
+                share_with("not an address", ShareRole::Viewer),
+            )
+            .await
+            .expect_err("the address is not one");
+
+        assert_eq!(with_self.app_code(), code::VALIDATION_FAILED);
+        assert_eq!(with_nothing.app_code(), code::VALIDATION_FAILED);
+    }
+
+    #[tokio::test]
+    async fn sharing_twice_is_a_conflict_that_names_the_address() {
+        let world = world().await;
+
+        world
+            .service
+            .share(
+                owner(),
+                "s1",
+                share_with("bob@example.com", ShareRole::Viewer),
+            )
+            .await
+            .expect("the first share should succeed");
+        let again = world
+            .service
+            .share(
+                owner(),
+                "s1",
+                share_with("bob@example.com", ShareRole::Editor),
+            )
+            .await
+            .expect_err("the second share should fail");
+
+        assert_eq!(again.app_code(), code::RESOURCE_CONFLICT);
+        assert!(again.to_string().contains("bob@example.com"));
+
+        world
+            .service
+            .share(
+                owner(),
+                "s1",
+                share_with("cat@example.com", ShareRole::Viewer),
+            )
+            .await
+            .expect("the first invitation should succeed");
+        let again = world
+            .service
+            .share(
+                owner(),
+                "s1",
+                share_with("cat@example.com", ShareRole::Viewer),
+            )
+            .await
+            .expect_err("the second invitation should fail");
+
+        assert_eq!(again.app_code(), code::RESOURCE_CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn the_people_list_holds_members_and_the_invited() {
+        let world = world().await;
+
+        world
+            .service
+            .share(
+                owner(),
+                "s1",
+                share_with("bob@example.com", ShareRole::Editor),
+            )
+            .await
+            .expect("the share should succeed");
+        world
+            .service
+            .share(
+                owner(),
+                "s1",
+                share_with("cat@example.com", ShareRole::Viewer),
+            )
+            .await
+            .expect("the invitation should succeed");
+
+        let people = world
+            .service
+            .people(owner(), "s1")
+            .await
+            .expect("the owner may list");
+
+        assert_eq!(people.members.len(), 1);
+        assert_eq!(people.members[0].user.email, "bob@example.com");
+        assert_eq!(people.invitations.len(), 1);
+        assert_eq!(people.invitations[0].email, "cat@example.com");
+    }
+
+    #[tokio::test]
+    async fn a_role_can_be_changed_and_access_taken_away() {
+        let world = world().await;
+        world
+            .service
+            .share(
+                owner(),
+                "s1",
+                share_with("bob@example.com", ShareRole::Viewer),
+            )
+            .await
+            .expect("the share should succeed");
+
+        let member = world
+            .service
+            .change_role(owner(), "s1", bob(), ShareRole::Editor)
+            .await
+            .expect("the owner may change a role");
+
+        assert_eq!(member.share.role, ShareRole::Editor);
+        assert_eq!(member.user.name, "Bob Builder");
+
+        world
+            .service
+            .revoke(owner(), "s1", bob())
+            .await
+            .expect("the owner may revoke");
+
+        assert!(world.shares.share_of("s1", bob()).is_none());
+        assert_eq!(
+            world
+                .service
+                .revoke(owner(), "s1", bob())
+                .await
+                .expect_err("there is nothing left to revoke")
+                .app_code(),
+            code::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn a_person_may_leave_but_not_push_someone_else_out() {
+        let world = world().await;
+        for who in [bob(), stranger()] {
+            world
+                .shares
+                .create_share("s1", who, ShareRole::Editor, owner())
+                .await
+                .expect("the share should be written");
+        }
+
+        assert_eq!(
+            world
+                .service
+                .revoke(bob(), "s1", stranger())
+                .await
+                .expect_err("an editor may not revoke another")
+                .app_code(),
+            code::FORBIDDEN
+        );
+
+        world
+            .service
+            .revoke(bob(), "s1", bob())
+            .await
+            .expect("anyone may give up their own access");
+
+        assert!(world.shares.share_of("s1", bob()).is_none());
+        assert!(world.shares.share_of("s1", stranger()).is_some());
+    }
+
+    #[tokio::test]
+    async fn an_invitation_can_be_cancelled_by_the_owner_alone() {
+        let world = world().await;
+        let Shared::Invited(invitation) = world
+            .service
+            .share(
+                owner(),
+                "s1",
+                share_with("cat@example.com", ShareRole::Viewer),
+            )
+            .await
+            .expect("the invitation should succeed")
+        else {
+            panic!("an unknown address is invited");
+        };
+
+        assert_eq!(
+            world
+                .service
+                .cancel_invitation(bob(), "s1", invitation.id)
+                .await
+                .expect_err("a stranger cannot tell the schema exists")
+                .app_code(),
+            code::NOT_FOUND
+        );
+
+        world
+            .service
+            .cancel_invitation(owner(), "s1", invitation.id)
+            .await
+            .expect("the owner may cancel");
+
+        assert!(world.shares.invitations_for("cat@example.com").is_empty());
+    }
 }
