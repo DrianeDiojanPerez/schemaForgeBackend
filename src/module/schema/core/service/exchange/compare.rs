@@ -131,8 +131,8 @@ fn attribute(table: &str, expected: &Attribute, actual: &Attribute, comparison: 
             field(
                 &path,
                 "default",
-                &optional(&expected.default_value),
-                &optional(&actual.default_value),
+                &folded(&optional(&expected.default_value)),
+                &folded(&optional(&actual.default_value)),
             ),
         ],
     );
@@ -383,6 +383,28 @@ fn field<T: ToString + PartialEq>(
 
 fn optional(value: &Option<String>) -> String {
     value.clone().unwrap_or_default()
+}
+
+/// A default as PostgreSQL would read it: words outside quotes fold to lower
+/// case, so `CURRENT_DATE` and `current_date` are one default, while text
+/// inside quotes is left as written.
+fn folded(default: &str) -> String {
+    let mut out = String::with_capacity(default.len());
+    let mut quoted = false;
+
+    for character in default.chars() {
+        if character == '\'' {
+            quoted = !quoted;
+        }
+
+        if quoted {
+            out.push(character);
+        } else {
+            out.extend(character.to_lowercase());
+        }
+    }
+
+    out
 }
 
 fn same(left: &str, right: &str) -> bool {
