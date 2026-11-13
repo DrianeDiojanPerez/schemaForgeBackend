@@ -63,5 +63,8 @@ fn sharing_routes(services: &Services) -> Router {
 }
 
 pub fn service(services: &Services) -> SchemaServiceServer<SchemaHandler> {
-    SchemaServiceServer::new(SchemaHandler::new(services.schema.clone()))
+    SchemaServiceServer::new(SchemaHandler::new(
+        services.schema.clone(),
+        services.sharing.clone(),
+    ))
 }

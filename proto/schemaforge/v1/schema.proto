@@ -481,4 +481,29 @@ service SchemaService {
   // Reads a file back into a draft. A file nobody can parse at all fails the
   // call; one that is only partly readable comes back with warnings.
   rpc ImportSchema(ImportSchemaRequest) returns (ImportSchemaResponse);
+
+  // ListSchemas stays the caller's own. What others let them in on is
+  // listed here.
+  rpc ListSharedSchemas(ListSharedSchemasRequest) returns (ListSharedSchemasResponse);
+
+  // Anyone with access sees the members. Only the owner also sees the
+  // invitations still open.
+  rpc ListPeople(ListPeopleRequest) returns (ListPeopleResponse);
+
+  // An address with an account gets access now. One without gets an
+  // invitation by email. Owner only.
+  rpc ShareSchema(ShareSchemaRequest) returns (ShareSchemaResponse);
+
+  // Owner only.
+  rpc ChangeShareRole(ChangeShareRoleRequest) returns (ChangeShareRoleResponse);
+
+  // The owner takes someone's access away, or a person gives up their own.
+  rpc RevokeShare(RevokeShareRequest) returns (RevokeShareResponse);
+
+  // Owner only.
+  rpc CancelInvitation(CancelInvitationRequest) returns (CancelInvitationResponse);
+
+  // The caller has to be signed in as the address the invitation went to,
+  // and a link only works once.
+  rpc AcceptInvitation(AcceptInvitationRequest) returns (AcceptInvitationResponse);
 }

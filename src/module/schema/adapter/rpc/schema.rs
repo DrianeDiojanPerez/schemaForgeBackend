@@ -4,9 +4,10 @@ use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
 use crate::module::schema::adapter::rpc::mapper;
+use crate::module::schema::core::domain::Access;
 use crate::module::schema::core::ports::{
     CompareRequest, ExportRequest, GenerateOptions, GenerateRequest, ImportRequest, SchemaService,
-    ValidationTarget,
+    ShareRequest, Shared, SharingService, ValidationTarget,
 };
 use crate::package::auth::AuthUser;
 use crate::package::errdef::Error;
@@ -15,11 +16,18 @@ use crate::rpc::v1;
 
 pub struct SchemaHandler {
     service: Arc<dyn SchemaService>,
+    sharing: Arc<dyn SharingService>,
 }
 
 impl SchemaHandler {
-    pub fn new(service: Arc<dyn SchemaService>) -> Self {
-        Self { service }
+    pub fn new(service: Arc<dyn SchemaService>, sharing: Arc<dyn SharingService>) -> Self {
+        Self { service, sharing }
+    }
+
+    /// A segment that is not an id names nothing, so it is a not found
+    /// rather than a bad request.
+    fn id_from(value: &str, what: &str) -> Result<Uuid, Error> {
+        Uuid::parse_str(value).map_err(|_| Error::not_found(format!("{what} does not exist")))
     }
 
     /// The guard put the caller here after it read the token, so a request
@@ -131,7 +139,7 @@ impl v1::schema_service_server::SchemaService for SchemaHandler {
         let schema = self.service.create(caller, draft).await?;
 
         Ok(Response::new(v1::CreateSchemaResponse {
-            schema: Some(mapper::schema_to(schema)),
+            schema: Some(mapper::opened_to(schema, Access::Owner)),
         }))
     }
 
@@ -141,13 +149,12 @@ impl v1::schema_service_server::SchemaService for SchemaHandler {
         request: Request<v1::GetSchemaRequest>,
     ) -> Result<Response<v1::GetSchemaResponse>, Status> {
         let caller = Self::caller(&request)?;
-        let schema = self
-            .service
-            .find_by_id(caller, &request.into_inner().id)
-            .await?;
+        let id = request.into_inner().id;
+        let schema = self.service.find_by_id(caller, &id).await?;
+        let access = self.service.access(caller, &id).await?;
 
         Ok(Response::new(v1::GetSchemaResponse {
-            schema: Some(mapper::schema_to(schema)),
+            schema: Some(mapper::opened_to(schema, access)),
         }))
     }
 
@@ -191,9 +198,10 @@ impl v1::schema_service_server::SchemaService for SchemaHandler {
         )?;
 
         let schema = self.service.replace(caller, &request.id, draft).await?;
+        let access = self.service.access(caller, &request.id).await?;
 
         Ok(Response::new(v1::UpdateSchemaResponse {
-            schema: Some(mapper::schema_to(schema)),
+            schema: Some(mapper::opened_to(schema, access)),
         }))
     }
 
@@ -332,6 +340,161 @@ impl v1::schema_service_server::SchemaService for SchemaHandler {
             diagnostics: mapper::report_to(imported.report),
         }))
     }
+
+    #[tracing::instrument(name = "SchemaService.ListSharedSchemas", skip_all)]
+    async fn list_shared_schemas(
+        &self,
+        request: Request<v1::ListSharedSchemasRequest>,
+    ) -> Result<Response<v1::ListSharedSchemasResponse>, Status> {
+        let caller = Self::caller(&request)?;
+        let request = request.into_inner();
+
+        let page = self
+            .sharing
+            .shared_with_me(
+                caller,
+                ListRequest::paged(request.page.into(), request.per_page.into()),
+            )
+            .await?;
+
+        Ok(Response::new(v1::ListSharedSchemasResponse {
+            schemas: page.data.into_iter().map(mapper::shared_to).collect(),
+            page: page.meta.current_page as u32,
+            per_page: page.meta.per_page as u32,
+            total: page.meta.total_count as u64,
+        }))
+    }
+
+    #[tracing::instrument(name = "SchemaService.ListPeople", skip_all)]
+    async fn list_people(
+        &self,
+        request: Request<v1::ListPeopleRequest>,
+    ) -> Result<Response<v1::ListPeopleResponse>, Status> {
+        let caller = Self::caller(&request)?;
+        let people = self
+            .sharing
+            .people(caller, &request.into_inner().schema_id)
+            .await?;
+
+        Ok(Response::new(v1::ListPeopleResponse {
+            members: people.members.into_iter().map(mapper::member_to).collect(),
+            invitations: people
+                .invitations
+                .into_iter()
+                .map(mapper::invitation_to)
+                .collect(),
+        }))
+    }
+
+    #[tracing::instrument(name = "SchemaService.ShareSchema", skip_all)]
+    async fn share_schema(
+        &self,
+        request: Request<v1::ShareSchemaRequest>,
+    ) -> Result<Response<v1::ShareSchemaResponse>, Status> {
+        let caller = Self::caller(&request)?;
+        let request = request.into_inner();
+
+        let shared = self
+            .sharing
+            .share(
+                caller,
+                &request.schema_id,
+                ShareRequest {
+                    email: request.email,
+                    role: mapper::share_role_from(request.role)?,
+                    callback_uri: request.callback_uri,
+                },
+            )
+            .await?;
+
+        Ok(Response::new(v1::ShareSchemaResponse {
+            outcome: Some(match shared {
+                Shared::Granted(member) => {
+                    v1::share_schema_response::Outcome::Member(mapper::member_to(member))
+                }
+                Shared::Invited(invitation) => v1::share_schema_response::Outcome::Invitation(
+                    mapper::invitation_to(invitation),
+                ),
+            }),
+        }))
+    }
+
+    #[tracing::instrument(name = "SchemaService.ChangeShareRole", skip_all)]
+    async fn change_share_role(
+        &self,
+        request: Request<v1::ChangeShareRoleRequest>,
+    ) -> Result<Response<v1::ChangeShareRoleResponse>, Status> {
+        let caller = Self::caller(&request)?;
+        let request = request.into_inner();
+
+        let member = self
+            .sharing
+            .change_role(
+                caller,
+                &request.schema_id,
+                Self::id_from(&request.user_id, "share")?,
+                mapper::share_role_from(request.role)?,
+            )
+            .await?;
+
+        Ok(Response::new(v1::ChangeShareRoleResponse {
+            member: Some(mapper::member_to(member)),
+        }))
+    }
+
+    #[tracing::instrument(name = "SchemaService.RevokeShare", skip_all)]
+    async fn revoke_share(
+        &self,
+        request: Request<v1::RevokeShareRequest>,
+    ) -> Result<Response<v1::RevokeShareResponse>, Status> {
+        let caller = Self::caller(&request)?;
+        let request = request.into_inner();
+
+        self.sharing
+            .revoke(
+                caller,
+                &request.schema_id,
+                Self::id_from(&request.user_id, "share")?,
+            )
+            .await?;
+
+        Ok(Response::new(v1::RevokeShareResponse {}))
+    }
+
+    #[tracing::instrument(name = "SchemaService.CancelInvitation", skip_all)]
+    async fn cancel_invitation(
+        &self,
+        request: Request<v1::CancelInvitationRequest>,
+    ) -> Result<Response<v1::CancelInvitationResponse>, Status> {
+        let caller = Self::caller(&request)?;
+        let request = request.into_inner();
+
+        self.sharing
+            .cancel_invitation(
+                caller,
+                &request.schema_id,
+                Self::id_from(&request.invitation_id, "invitation")?,
+            )
+            .await?;
+
+        Ok(Response::new(v1::CancelInvitationResponse {}))
+    }
+
+    #[tracing::instrument(name = "SchemaService.AcceptInvitation", skip_all)]
+    async fn accept_invitation(
+        &self,
+        request: Request<v1::AcceptInvitationRequest>,
+    ) -> Result<Response<v1::AcceptInvitationResponse>, Status> {
+        let caller = Self::caller(&request)?;
+        let listing = self
+            .sharing
+            .accept_invitation(caller, &request.into_inner().token)
+            .await?;
+
+        Ok(Response::new(v1::AcceptInvitationResponse {
+            schema: Some(mapper::shared_to(listing)),
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -344,9 +507,12 @@ mod tests {
     use tonic::Code;
 
     use crate::module::schema::core::domain::{
-        Access, Comparison, Report, Schema, SchemaDraft, SchemaSummary,
+        Collaborator, Comparison, Invitation, Report, Schema, SchemaDraft, SchemaSummary, Share,
+        ShareRole,
     };
-    use crate::module::schema::core::ports::{Exported, Generated, Imported};
+    use crate::module::schema::core::ports::{
+        Exported, Generated, Imported, Member, People, SharedListing,
+    };
     use crate::package::auth::Identity;
     use crate::package::pagination::{Data, DEFAULT_PER_PAGE};
     use v1::schema_service_server::SchemaService as _;
@@ -498,8 +664,159 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct SpySharing {
+        calls: Mutex<Vec<(Uuid, String)>>,
+    }
+
+    impl SpySharing {
+        fn note(&self, caller: Uuid, what: impl Into<String>) {
+            self.calls
+                .lock()
+                .expect("the lock should be held")
+                .push((caller, what.into()));
+        }
+
+        fn bob() -> Collaborator {
+            Collaborator {
+                id: Uuid::from_u128(2),
+                email: "bob@example.com".to_owned(),
+                name: "Bob Builder".to_owned(),
+                avatar_url: None,
+            }
+        }
+
+        fn member(role: ShareRole) -> Member {
+            Member {
+                share: Share {
+                    schema_id: "s1".to_owned(),
+                    user_id: Uuid::from_u128(2),
+                    role,
+                    shared_by: Uuid::from_u128(1),
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
+                },
+                user: Self::bob(),
+            }
+        }
+
+        fn invitation() -> Invitation {
+            Invitation {
+                id: Uuid::from_u128(9),
+                schema_id: "s1".to_owned(),
+                email: "cat@example.com".to_owned(),
+                role: ShareRole::Viewer,
+                invited_by: Uuid::from_u128(1),
+                expires_at: chrono::Utc::now(),
+                created_at: chrono::Utc::now(),
+            }
+        }
+
+        fn listing() -> SharedListing {
+            SharedListing {
+                summary: Schema::new(
+                    "s1",
+                    SchemaDraft {
+                        name: "blog".to_owned(),
+                        ..SchemaDraft::default()
+                    },
+                    chrono::Utc::now(),
+                )
+                .summary(),
+                role: ShareRole::Editor,
+                owner: Self::bob(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl SharingService for SpySharing {
+        async fn shared_with_me(
+            &self,
+            caller: Uuid,
+            request: ListRequest,
+        ) -> Result<Data<SharedListing>, Error> {
+            self.note(caller, "shared_with_me");
+
+            Ok(Data::new(
+                vec![Self::listing()],
+                1,
+                request.page,
+                request.per_page,
+            ))
+        }
+
+        async fn people(&self, caller: Uuid, _schema_id: &str) -> Result<People, Error> {
+            self.note(caller, "people");
+
+            Ok(People {
+                members: vec![Self::member(ShareRole::Viewer)],
+                invitations: vec![Self::invitation()],
+            })
+        }
+
+        async fn share(
+            &self,
+            caller: Uuid,
+            _schema_id: &str,
+            request: ShareRequest,
+        ) -> Result<Shared, Error> {
+            self.note(caller, format!("share:{}:{}", request.email, request.role));
+
+            if request.email == "cat@example.com" {
+                return Ok(Shared::Invited(Self::invitation()));
+            }
+
+            Ok(Shared::Granted(Self::member(request.role)))
+        }
+
+        async fn change_role(
+            &self,
+            caller: Uuid,
+            _schema_id: &str,
+            _user_id: Uuid,
+            role: ShareRole,
+        ) -> Result<Member, Error> {
+            self.note(caller, format!("change_role:{role}"));
+
+            Ok(Self::member(role))
+        }
+
+        async fn revoke(
+            &self,
+            caller: Uuid,
+            _schema_id: &str,
+            _user_id: Uuid,
+        ) -> Result<(), Error> {
+            self.note(caller, "revoke");
+
+            Ok(())
+        }
+
+        async fn cancel_invitation(
+            &self,
+            caller: Uuid,
+            _schema_id: &str,
+            _invitation_id: Uuid,
+        ) -> Result<(), Error> {
+            self.note(caller, "cancel_invitation");
+
+            Ok(())
+        }
+
+        async fn accept_invitation(
+            &self,
+            caller: Uuid,
+            token: &str,
+        ) -> Result<SharedListing, Error> {
+            self.note(caller, format!("accept:{token}"));
+
+            Ok(Self::listing())
+        }
+    }
+
     fn handler(service: SpyService) -> SchemaHandler {
-        SchemaHandler::new(Arc::new(service))
+        SchemaHandler::new(Arc::new(service), Arc::new(SpySharing::default()))
     }
 
     fn caller() -> AuthUser {
@@ -674,7 +991,7 @@ mod tests {
     #[tokio::test]
     async fn every_rpc_hands_the_caller_to_the_service() {
         let spy = Arc::new(SpyService::default());
-        let handler = SchemaHandler::new(spy.clone());
+        let handler = SchemaHandler::new(spy.clone(), Arc::new(SpySharing::default()));
         let stored = "s1".to_owned();
 
         handler
@@ -737,7 +1054,11 @@ mod tests {
 
         let callers = spy.callers.lock().expect("the lock should be held");
 
-        assert_eq!(callers.len(), 8);
+        assert_eq!(
+            callers.len(),
+            10,
+            "get and update also ask what the caller may do"
+        );
         assert!(callers.iter().all(|seen| *seen == caller().id()));
     }
 
