@@ -1,6 +1,8 @@
 pub(crate) mod exchange;
 
 #[cfg(test)]
+pub(crate) mod fake_shares;
+#[cfg(test)]
 pub(crate) mod fixtures;
 
 mod generator;
