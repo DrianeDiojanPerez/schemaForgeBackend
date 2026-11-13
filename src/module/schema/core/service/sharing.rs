@@ -1246,4 +1246,166 @@ mod tests {
 
         assert!(world.shares.invitations_for("cat@example.com").is_empty());
     }
+
+    async fn invited_cat(world: &World) -> (Uuid, String) {
+        let (_, _, data) = {
+            world
+                .service
+                .share(
+                    owner(),
+                    "s1",
+                    share_with("cat@example.com", ShareRole::Editor),
+                )
+                .await
+                .expect("the invitation should succeed");
+            world.mailer.last()
+        };
+        let token = data["callbackURI"][CALLBACK.len()..].to_owned();
+
+        (Uuid::from_u128(4), token)
+    }
+
+    fn knowing_cat(world: World, cat: Uuid) -> SharingServiceImpl {
+        SharingServiceImpl::new(
+            world.schemas.clone(),
+            world.shares.clone(),
+            Arc::new(FakeDirectory::knowing(vec![
+                person(owner(), "ada@example.com", "Ada Lovelace"),
+                person(bob(), "bob@example.com", "Bob Builder"),
+                person(cat, "Cat@Example.com", "Cat"),
+            ])),
+            world.mailer.clone(),
+        )
+    }
+
+    #[tokio::test]
+    async fn opening_the_link_as_the_invited_address_grants_the_role_once() {
+        let world = world().await;
+        let (cat, token) = invited_cat(&world).await;
+        let shares = world.shares.clone();
+        let service = knowing_cat(world, cat);
+
+        let listing = service
+            .accept_invitation(cat, &token)
+            .await
+            .expect("the invited person may accept");
+
+        assert_eq!(listing.summary.name, "blog");
+        assert_eq!(listing.role, ShareRole::Editor);
+        assert_eq!(listing.owner.name, "Ada Lovelace");
+        assert_eq!(
+            shares.share_of("s1", cat).map(|share| share.role),
+            Some(ShareRole::Editor)
+        );
+        assert_eq!(
+            service
+                .accept_invitation(cat, &token)
+                .await
+                .expect_err("a link works once")
+                .app_code(),
+            code::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn a_forwarded_link_does_not_work_for_someone_else() {
+        let world = world().await;
+        let (cat, token) = invited_cat(&world).await;
+        let shares = world.shares.clone();
+        let service = knowing_cat(world, cat);
+
+        assert_eq!(
+            service
+                .accept_invitation(bob(), &token)
+                .await
+                .expect_err("bob was not invited")
+                .app_code(),
+            code::FORBIDDEN
+        );
+        assert!(
+            shares.share_of("s1", bob()).is_none(),
+            "nothing was granted"
+        );
+        assert_eq!(
+            service
+                .accept_invitation(cat, "not-a-token")
+                .await
+                .expect_err("an unknown token names nothing")
+                .app_code(),
+            code::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn an_invitation_that_ran_out_is_refused_and_cleared() {
+        let world = world().await;
+        world
+            .shares
+            .create_invitation(InvitationDraft {
+                schema_id: "s1".to_owned(),
+                email: "bob@example.com".to_owned(),
+                role: ShareRole::Viewer,
+                token_hash: crypto::hash_token("old"),
+                invited_by: owner(),
+                expires_at: Utc::now() - Duration::days(1),
+            })
+            .await
+            .expect("the invitation should be written");
+
+        let error = world
+            .service
+            .accept_invitation(bob(), "old")
+            .await
+            .expect_err("the invitation ran out");
+
+        assert_eq!(error.app_code(), code::BAD_REQUEST);
+        assert!(world.shares.invitations_for("bob@example.com").is_empty());
+
+        // The owner can invite the address again rather than being told it
+        // is already invited.
+        let Shared::Granted(_) = world
+            .service
+            .share(
+                owner(),
+                "s1",
+                share_with("bob@example.com", ShareRole::Viewer),
+            )
+            .await
+            .expect("sharing again should succeed")
+        else {
+            panic!("bob has an account by now");
+        };
+    }
+
+    #[tokio::test]
+    async fn shared_with_me_lists_what_others_let_me_in_on() {
+        let world = world().await;
+        for schema_id in ["s1", "s2"] {
+            world
+                .shares
+                .create_share(schema_id, bob(), ShareRole::Viewer, owner())
+                .await
+                .expect("the share should be written");
+        }
+
+        let page = world
+            .service
+            .shared_with_me(bob(), ListRequest::paged(1, 1))
+            .await
+            .expect("the listing should succeed");
+
+        assert_eq!(page.meta.total_count, 2);
+        assert_eq!(page.data.len(), 1, "the page is capped at the page size");
+        assert_eq!(page.data[0].summary.name, "blog");
+        assert_eq!(page.data[0].role, ShareRole::Viewer);
+        assert_eq!(page.data[0].owner.email, "ada@example.com");
+
+        let nothing = world
+            .service
+            .shared_with_me(stranger(), ListRequest::default())
+            .await
+            .expect("the listing should succeed");
+
+        assert_eq!(nothing.meta.total_count, 0);
+    }
 }
