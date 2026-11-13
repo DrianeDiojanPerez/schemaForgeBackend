@@ -1077,4 +1077,144 @@ mod tests {
 
         assert_eq!(status.code(), Code::Unauthenticated);
     }
+
+    #[tokio::test]
+    async fn sharing_answers_a_member_for_an_account_and_an_invitation_for_a_stranger() {
+        let handler = handler(SpyService::default());
+
+        let granted = handler
+            .share_schema(signed(v1::ShareSchemaRequest {
+                schema_id: "s1".to_owned(),
+                email: "bob@example.com".to_owned(),
+                role: v1::ShareRole::Editor as i32,
+                callback_uri: "https://app.test/invitations/".to_owned(),
+            }))
+            .await
+            .expect("the call should succeed")
+            .into_inner();
+
+        assert!(matches!(
+            granted.outcome,
+            Some(v1::share_schema_response::Outcome::Member(ref member))
+                if member.role == v1::ShareRole::Editor as i32
+        ));
+
+        let invited = handler
+            .share_schema(signed(v1::ShareSchemaRequest {
+                schema_id: "s1".to_owned(),
+                email: "cat@example.com".to_owned(),
+                role: v1::ShareRole::Viewer as i32,
+                callback_uri: "https://app.test/invitations/".to_owned(),
+            }))
+            .await
+            .expect("the call should succeed")
+            .into_inner();
+
+        assert!(matches!(
+            invited.outcome,
+            Some(v1::share_schema_response::Outcome::Invitation(ref invitation))
+                if invitation.email == "cat@example.com"
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_unset_role_and_an_id_that_is_not_one_are_refused_before_the_service() {
+        let handler = handler(SpyService::default());
+
+        let status = handler
+            .share_schema(signed(v1::ShareSchemaRequest {
+                schema_id: "s1".to_owned(),
+                email: "bob@example.com".to_owned(),
+                role: v1::ShareRole::Unspecified as i32,
+                callback_uri: String::new(),
+            }))
+            .await
+            .expect_err("the call should fail");
+
+        assert_eq!(status.code(), Code::InvalidArgument);
+
+        let status = handler
+            .revoke_share(signed(v1::RevokeShareRequest {
+                schema_id: "s1".to_owned(),
+                user_id: "bob".to_owned(),
+            }))
+            .await
+            .expect_err("the call should fail");
+
+        assert_eq!(status.code(), Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn every_sharing_rpc_hands_the_caller_to_the_service() {
+        let sharing = Arc::new(SpySharing::default());
+        let handler = SchemaHandler::new(Arc::new(SpyService::default()), sharing.clone());
+        let bob = Uuid::from_u128(2).to_string();
+
+        handler
+            .list_shared_schemas(signed(v1::ListSharedSchemasRequest {
+                page: 1,
+                per_page: 10,
+            }))
+            .await
+            .expect("list should succeed");
+        handler
+            .list_people(signed(v1::ListPeopleRequest {
+                schema_id: "s1".to_owned(),
+            }))
+            .await
+            .expect("people should succeed");
+        handler
+            .share_schema(signed(v1::ShareSchemaRequest {
+                schema_id: "s1".to_owned(),
+                email: "bob@example.com".to_owned(),
+                role: v1::ShareRole::Viewer as i32,
+                callback_uri: "https://app.test/invitations/".to_owned(),
+            }))
+            .await
+            .expect("share should succeed");
+        handler
+            .change_share_role(signed(v1::ChangeShareRoleRequest {
+                schema_id: "s1".to_owned(),
+                user_id: bob.clone(),
+                role: v1::ShareRole::Editor as i32,
+            }))
+            .await
+            .expect("change should succeed");
+        handler
+            .revoke_share(signed(v1::RevokeShareRequest {
+                schema_id: "s1".to_owned(),
+                user_id: bob,
+            }))
+            .await
+            .expect("revoke should succeed");
+        handler
+            .cancel_invitation(signed(v1::CancelInvitationRequest {
+                schema_id: "s1".to_owned(),
+                invitation_id: Uuid::from_u128(9).to_string(),
+            }))
+            .await
+            .expect("cancel should succeed");
+        let accepted = handler
+            .accept_invitation(signed(v1::AcceptInvitationRequest {
+                token: "tok".to_owned(),
+            }))
+            .await
+            .expect("accept should succeed")
+            .into_inner()
+            .schema
+            .expect("a schema should come back");
+
+        assert_eq!(accepted.role, v1::ShareRole::Editor as i32);
+        assert_eq!(
+            accepted.owner.map(|owner| owner.name),
+            Some("Bob Builder".to_owned())
+        );
+
+        let calls = sharing.calls.lock().expect("the lock should be held");
+
+        assert_eq!(calls.len(), 7);
+        assert!(calls.iter().all(|(seen, _)| *seen == caller().id()));
+        assert!(calls.iter().any(|(_, what)| what == "accept:tok"));
+        assert!(calls.iter().any(|(_, what)| what == "change_role:editor"));
+    }
 }
