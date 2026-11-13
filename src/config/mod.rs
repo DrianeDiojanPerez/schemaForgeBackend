@@ -12,7 +12,7 @@ pub use db::Db;
 pub use google::Google;
 pub use jwt::Jwt;
 pub use logger::{LogLevel, Logger};
-pub use mail::Mail;
+pub use mail::{Mail, MailEncryption};
 pub use rbac::Rbac;
 pub use server::{Deployment, Environment, Server};
 
@@ -91,6 +91,7 @@ impl AppConfig {
         Ok(Mail {
             host: env::string_or("MAIL_HOST", "mail"),
             port: env::u16_or("MAIL_PORT", 1025)?,
+            encryption: env::variant_or_default("MAIL_ENCRYPTION")?,
             username: env::string("MAIL_USERNAME").unwrap_or_default(),
             password: env::string("MAIL_PASSWORD").unwrap_or_default(),
             from_address: env::string_or("MAIL_FROM_ADDRESS", "noreply@example.com"),

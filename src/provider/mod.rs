@@ -34,7 +34,7 @@ impl Provider {
         let tx = TxManager::new(database.clone());
 
         let jwt: Arc<dyn TokenGenerator> = Arc::new(HmacTokenGenerator::new(config.jwt.secret()));
-        let mailer: Arc<dyn Emailer> = Arc::new(SmtpEmailer::new(&config.mail));
+        let mailer: Arc<dyn Emailer> = Arc::new(SmtpEmailer::new(&config.mail)?);
 
         let google: Arc<dyn GoogleIdentity> = Arc::new(GoogleOAuth::new(GoogleCredentials {
             client_id: config.google.client_id.clone(),

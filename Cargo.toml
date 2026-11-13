@@ -69,6 +69,7 @@ lettre = { version = "0.11", default-features = false, features = [
     "hostname",
     "smtp-transport",
     "tokio1",
+    "tokio1-rustls-tls",
 ] }
 
 # outbound http

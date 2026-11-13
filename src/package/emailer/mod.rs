@@ -5,7 +5,7 @@ use lettre::message::header::ContentType;
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 
-use crate::config::Mail;
+use crate::config::{Mail, MailEncryption};
 
 const TEMPLATES: &[(&str, &str)] = &[
     (
@@ -51,19 +51,27 @@ pub struct SmtpEmailer {
 }
 
 impl SmtpEmailer {
-    pub fn new(cfg: &Mail) -> Self {
-        let mut builder =
-            AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&cfg.host).port(cfg.port);
+    pub fn new(cfg: &Mail) -> Result<Self, EmailerError> {
+        let mut builder = match cfg.encryption {
+            MailEncryption::None => {
+                AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&cfg.host)
+            }
+            MailEncryption::StartTls => {
+                AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&cfg.host)?
+            }
+            MailEncryption::Tls => AsyncSmtpTransport::<Tokio1Executor>::relay(&cfg.host)?,
+        }
+        .port(cfg.port);
 
         if !cfg.username.is_empty() {
             builder =
                 builder.credentials(Credentials::new(cfg.username.clone(), cfg.password.clone()));
         }
 
-        Self {
+        Ok(Self {
             transport: builder.build(),
             from: format!("{} <{}>", cfg.from_name, cfg.from_address),
-        }
+        })
     }
 
     fn render(template_name: &str, data: &HashMap<String, String>) -> Result<String, EmailerError> {
