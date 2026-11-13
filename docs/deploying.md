@@ -13,6 +13,12 @@ fly secrets set DB_HOST=... DB_DATABASE=... DB_USERNAME=... DB_PASSWORD=... \
 just deploy
 ```
 
+Mail goes out through Gmail: `MAIL_HOST=smtp.gmail.com`, `MAIL_PORT=587`, the
+account as `MAIL_USERNAME` and an app password as `MAIL_PASSWORD`. Gmail only
+sends as the account that signed in, so `MAIL_FROM_ADDRESS` in `fly.toml` is
+that same address, and `MAIL_ENCRYPTION` is `starttls` because port 587 wants
+it.
+
 The HTTP port is public. The gRPC port is not: the frontend reaches it over
 the private network as `schemaforge-api.internal:50051`, which is what its
 `SCHEMAFORGE_GRPC_ADDRESS` secret holds. A private port is only there while
