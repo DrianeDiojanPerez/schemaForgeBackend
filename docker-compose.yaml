@@ -1,7 +1,7 @@
 services:
   # ──── Global Containers ──────────────────────────────────
   mail:
-    image: mailhog/mailhog
+    image: axllent/mailpit
     container_name: schemaforge-mail
     profiles: ["dev", "uat"]
     ports:
