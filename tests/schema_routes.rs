@@ -1000,3 +1000,328 @@ async fn a_comparison_against_no_script_at_all_is_refused() {
     assert!(body["error"]["errors"].get("schema_id").is_some(), "{body}");
     assert!(body["error"]["errors"].get("content").is_some(), "{body}");
 }
+
+// ──── Sharing ──────────────────────────────────
+
+const CALLBACK: &str = "https://app.test/invitations/";
+
+async fn shared(app: &TestApp, id: &str, email: &str, role: &str) -> (StatusCode, Value) {
+    app.authorized(
+        "POST",
+        &format!("/v1/schemas/{id}/shares"),
+        Some(json!({ "email": email, "role": role, "callback_uri": CALLBACK })),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn a_schema_shared_with_a_person_shows_up_in_their_list_with_their_role() {
+    let app = TestApp::new();
+    let token = app.another_user().await;
+    let created = created(&app, "shared").await;
+    let id = created["id"].as_str().expect("an id should come back");
+
+    assert_eq!(created["access"], "owner", "the maker owns what they made");
+
+    let (status, body) = shared(&app, id, "Stranger@Example.com", "viewer").await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["member"]["user"]["name"], "Sam Stranger");
+    assert_eq!(body["data"]["member"]["role"], "viewer");
+    assert!(body["data"]["invitation"].is_null());
+
+    let (status, body) = app
+        .send(authorized(
+            "GET",
+            "/v1/schemas/shared-with-me",
+            &token,
+            None,
+        ))
+        .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["pagination"]["total_count"], 1);
+    assert_eq!(body["data"][0]["id"], id);
+    assert_eq!(body["data"][0]["name"], "shared");
+    assert_eq!(body["data"][0]["role"], "viewer");
+    assert_eq!(body["data"][0]["owner"]["email"], "admin@example.com");
+
+    let (status, body) = app
+        .send(authorized(
+            "GET",
+            &format!("/v1/schemas/{id}"),
+            &token,
+            None,
+        ))
+        .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["access"], "viewer");
+
+    let (status, body) = app
+        .send(authorized(
+            "PUT",
+            &format!("/v1/schemas/{id}"),
+            &token,
+            Some(a_schema("taken over")),
+        ))
+        .await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+    let (_, body) = app
+        .send(authorized("GET", "/v1/schemas", &token, None))
+        .await;
+
+    assert_eq!(
+        body["pagination"]["total_count"], 0,
+        "a shared schema is not one of their own"
+    );
+}
+
+#[tokio::test]
+async fn an_editor_may_change_the_drawing_and_be_demoted_or_removed() {
+    let app = TestApp::new();
+    let token = app.another_user().await;
+    let created = created(&app, "edited").await;
+    let id = created["id"].as_str().expect("an id should come back");
+
+    let (_, body) = shared(&app, id, "stranger@example.com", "editor").await;
+    let user_id = body["data"]["member"]["user"]["id"]
+        .as_str()
+        .expect("the member's id should come back")
+        .to_owned();
+
+    let (status, body) = app
+        .send(authorized(
+            "PUT",
+            &format!("/v1/schemas/{id}"),
+            &token,
+            Some(a_schema("edited by a friend")),
+        ))
+        .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["name"], "edited by a friend");
+    assert_eq!(body["data"]["access"], "editor");
+
+    let (status, body) = app
+        .send(authorized(
+            "DELETE",
+            &format!("/v1/schemas/{id}"),
+            &token,
+            None,
+        ))
+        .await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+    let (status, body) = app
+        .authorized(
+            "PATCH",
+            &format!("/v1/schemas/{id}/shares/{user_id}"),
+            Some(json!({ "role": "viewer" })),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["role"], "viewer");
+
+    let (status, body) = app
+        .authorized(
+            "DELETE",
+            &format!("/v1/schemas/{id}/shares/{user_id}"),
+            None,
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["user_id"], user_id);
+
+    let (status, _) = app
+        .send(authorized(
+            "GET",
+            &format!("/v1/schemas/{id}"),
+            &token,
+            None,
+        ))
+        .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND, "access is gone");
+}
+
+#[tokio::test]
+async fn an_address_without_an_account_is_invited_by_mail_and_lets_itself_in() {
+    let app = TestApp::new();
+    let created = created(&app, "invited").await;
+    let id = created["id"].as_str().expect("an id should come back");
+
+    let (status, body) = shared(&app, id, "cat@example.com", "editor").await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["data"]["member"].is_null());
+    assert_eq!(body["data"]["invitation"]["email"], "cat@example.com");
+    let invitation_id = body["data"]["invitation"]["id"]
+        .as_str()
+        .expect("an id should come back")
+        .to_owned();
+
+    let mail = app.mail.last();
+
+    assert_eq!(mail.to, "cat@example.com");
+    assert_eq!(mail.template, "schema-invitation");
+    assert_eq!(mail.subject, "App Admin shared \"invited\" with you");
+    assert_eq!(mail.data["role"], "editor");
+
+    let (_, body) = app
+        .get_authorized(&format!("/v1/schemas/{id}/people"))
+        .await;
+
+    assert_eq!(body["data"]["members"].as_array().map(Vec::len), Some(0));
+    assert_eq!(body["data"]["invitations"][0]["id"], invitation_id);
+
+    let cat = app.sign_up("cat@example.com", "Cat").await;
+    let token = mail.token(CALLBACK);
+
+    let (status, body) = app
+        .send(authorized(
+            "POST",
+            &format!("/v1/invitations/{token}/accept"),
+            &cat,
+            None,
+        ))
+        .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["id"], id);
+    assert_eq!(body["data"]["role"], "editor");
+    assert_eq!(body["data"]["owner"]["name"], "App Admin");
+
+    let (status, _) = app
+        .send(authorized(
+            "POST",
+            &format!("/v1/invitations/{token}/accept"),
+            &cat,
+            None,
+        ))
+        .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND, "a link works once");
+
+    let (_, body) = app
+        .get_authorized(&format!("/v1/schemas/{id}/people"))
+        .await;
+
+    assert_eq!(
+        body["data"]["members"][0]["user"]["email"],
+        "cat@example.com"
+    );
+    assert_eq!(
+        body["data"]["invitations"].as_array().map(Vec::len),
+        Some(0)
+    );
+}
+
+#[tokio::test]
+async fn an_invitation_only_works_for_the_address_it_went_to_and_can_be_cancelled() {
+    let app = TestApp::new();
+    let someone_else = app.another_user().await;
+    let created = created(&app, "guarded").await;
+    let id = created["id"].as_str().expect("an id should come back");
+
+    let (_, body) = shared(&app, id, "cat@example.com", "viewer").await;
+    let invitation_id = body["data"]["invitation"]["id"]
+        .as_str()
+        .expect("an id should come back")
+        .to_owned();
+    let token = app.mail.last().token(CALLBACK);
+
+    let (status, body) = app
+        .send(authorized(
+            "POST",
+            &format!("/v1/invitations/{token}/accept"),
+            &someone_else,
+            None,
+        ))
+        .await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+    let (status, body) = app
+        .authorized(
+            "DELETE",
+            &format!("/v1/schemas/{id}/invitations/{invitation_id}"),
+            None,
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["invitation_id"], invitation_id);
+
+    let cat = app.sign_up("cat@example.com", "Cat").await;
+    let (status, _) = app
+        .send(authorized(
+            "POST",
+            &format!("/v1/invitations/{token}/accept"),
+            &cat,
+            None,
+        ))
+        .await;
+
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a cancelled invitation is gone"
+    );
+}
+
+#[tokio::test]
+async fn only_the_owner_decides_who_gets_in() {
+    let app = TestApp::new();
+    let viewer = app.another_user().await;
+    let created = created(&app, "owned").await;
+    let id = created["id"].as_str().expect("an id should come back");
+
+    shared(&app, id, "stranger@example.com", "viewer").await;
+
+    let (status, _) = app
+        .send(authorized(
+            "POST",
+            &format!("/v1/schemas/{id}/shares"),
+            &viewer,
+            Some(json!({ "email": "cat@example.com", "role": "viewer", "callback_uri": CALLBACK })),
+        ))
+        .await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let (status, body) = app
+        .send(authorized(
+            "GET",
+            &format!("/v1/schemas/{id}/people"),
+            &viewer,
+            None,
+        ))
+        .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["members"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        body["data"]["invitations"].as_array().map(Vec::len),
+        Some(0)
+    );
+
+    let (status, body) = shared(&app, id, "admin@example.com", "viewer").await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(body["error"]["errors"]["email"].is_array());
+
+    let (status, body) = shared(&app, id, "stranger@example.com", "owner").await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(body["error"]["errors"]["role"].is_array());
+
+    let (status, body) = shared(&app, id, "stranger@example.com", "editor").await;
+
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+}
