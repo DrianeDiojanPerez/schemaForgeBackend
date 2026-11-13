@@ -92,6 +92,15 @@ impl AuthService {
         Ok(())
     }
 
+    /// Whatever was shared with the address before it had an account is
+    /// waiting as invitations, and this is when they come good.
+    async fn welcome(&self, user_id: Uuid, email: &str) -> Result<(), Error> {
+        self.seed(user_id).await?;
+        self.schemas.claim_invitations(user_id, email).await?;
+
+        Ok(())
+    }
+
     fn generate_tokens(&self, user: &Identity) -> Result<AuthenticationTokens, Error> {
         let now = Utc::now();
 
@@ -194,7 +203,7 @@ impl AuthService {
 
         match created {
             Ok(user_id) => {
-                self.seed(user_id).await?;
+                self.welcome(user_id, email).await?;
                 self.require_user_by_id(user_id).await
             }
             Err(err) if pg_error::is(&err, pg_error::UNIQUE_VIOLATION) => {
@@ -307,7 +316,7 @@ impl Auth for AuthService {
             .store
             .create_user(&NewUser {
                 user_name: registration.email.clone(),
-                email: registration.email,
+                email: registration.email.clone(),
                 first_name,
                 last_name,
                 avatar_url: None,
@@ -317,7 +326,7 @@ impl Auth for AuthService {
             .await
             .map_err(creation_error)?;
 
-        self.seed(user_id).await?;
+        self.welcome(user_id, &registration.email).await?;
 
         let user = self.require_user_by_id(user_id).await?;
 
@@ -449,8 +458,10 @@ mod tests {
 
     use async_trait::async_trait;
 
-    use crate::module::schema::core::domain::{DomainError, Schema, SchemaDraft, SchemaSummary};
-    use crate::module::schema::core::ports::SchemaRepository;
+    use crate::module::schema::core::domain::{
+        DomainError, Schema, SchemaDraft, SchemaSummary, ShareRole,
+    };
+    use crate::module::schema::core::ports::{InvitationDraft, SchemaRepository, ShareRepository};
     use crate::module::schema::core::sample::SAMPLE_SCHEMA_NAME;
     use crate::module::schema::core::service::fake_shares::{FakeDirectory, FakeShares};
     use crate::module::schema::Services;
@@ -835,6 +846,84 @@ mod tests {
         let user = created.first().expect("the user should be stored");
 
         assert_only_the_sample(&schemas, user.id);
+    }
+
+    async fn invitation_waiting_on(shares: &FakeShares, email: &str) {
+        let owner = Uuid::new_v4();
+        shares.own("s1", owner);
+        shares
+            .create_invitation(InvitationDraft {
+                schema_id: "s1".to_owned(),
+                email: email.to_owned(),
+                role: ShareRole::Editor,
+                token_hash: "hash".to_owned(),
+                invited_by: owner,
+                expires_at: Utc::now() + Duration::days(7),
+            })
+            .await
+            .expect("the invitation should be written");
+    }
+
+    #[tokio::test]
+    async fn signing_up_with_an_invited_address_claims_what_was_shared_with_it() {
+        let store = Arc::new(FakeStore::default());
+        let shares = Arc::new(FakeShares::default());
+        invitation_waiting_on(&shares, "sam@example.com").await;
+        let (service, _) = service_with_shares(
+            store.clone(),
+            Arc::new(FakeMailer::default()),
+            Arc::new(FakeGoogle::default()),
+            Arc::new(FakeSchemas::default()),
+            shares.clone(),
+        );
+
+        service
+            .register(Registration {
+                name: "Sam Stranger".to_owned(),
+                email: " Sam@Example.com ".to_owned(),
+                password: PASSWORD.to_owned(),
+            })
+            .await
+            .expect("the sign up should succeed");
+
+        let created = store.created.lock().unwrap();
+        let user = created.first().expect("the user should be stored");
+
+        assert_eq!(
+            shares.share_of("s1", user.id).map(|share| share.role),
+            Some(ShareRole::Editor),
+            "the invitation became a share for the new account"
+        );
+        assert!(shares.invitations_for("sam@example.com").is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_first_google_sign_in_with_an_invited_address_claims_it_too() {
+        let store = Arc::new(FakeStore::default());
+        let shares = Arc::new(FakeShares::default());
+        invitation_waiting_on(&shares, "sam@example.com").await;
+        let (service, _) = service_with_shares(
+            store.clone(),
+            Arc::new(FakeMailer::default()),
+            Arc::new(FakeGoogle::answering_as(
+                "sam@example.com",
+                true,
+                "Sam Stranger",
+                None,
+            )),
+            Arc::new(FakeSchemas::default()),
+            shares.clone(),
+        );
+
+        service
+            .login_with_google("a-code")
+            .await
+            .expect("the sign in should succeed");
+
+        let created = store.created.lock().unwrap();
+        let user = created.first().expect("the user should be stored");
+
+        assert!(shares.share_of("s1", user.id).is_some());
     }
 
     #[tokio::test]
