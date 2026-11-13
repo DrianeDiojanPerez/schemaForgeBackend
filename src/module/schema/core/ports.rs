@@ -161,6 +161,83 @@ pub trait SchemaService: Send + Sync {
     async fn compare(&self, caller: Uuid, request: CompareRequest) -> Result<Comparison, Error>;
 }
 
+#[async_trait]
+pub trait SharingService: Send + Sync {
+    async fn shared_with_me(
+        &self,
+        caller: Uuid,
+        request: ListRequest,
+    ) -> Result<Data<SharedListing>, Error>;
+
+    /// Owner only.
+    async fn people(&self, caller: Uuid, schema_id: &str) -> Result<People, Error>;
+
+    /// An address with an account gets access now. One without gets an
+    /// invitation by email. Owner only.
+    async fn share(
+        &self,
+        caller: Uuid,
+        schema_id: &str,
+        request: ShareRequest,
+    ) -> Result<Shared, Error>;
+
+    async fn change_role(
+        &self,
+        caller: Uuid,
+        schema_id: &str,
+        user_id: Uuid,
+        role: ShareRole,
+    ) -> Result<Member, Error>;
+
+    /// The owner takes someone's access away, or a person gives up their
+    /// own.
+    async fn revoke(&self, caller: Uuid, schema_id: &str, user_id: Uuid) -> Result<(), Error>;
+
+    async fn cancel_invitation(
+        &self,
+        caller: Uuid,
+        schema_id: &str,
+        invitation_id: Uuid,
+    ) -> Result<(), Error>;
+
+    /// The caller has to be signed in as the address the invitation went to.
+    async fn accept_invitation(&self, caller: Uuid, token: &str) -> Result<SharedListing, Error>;
+}
+
+#[derive(Debug, Clone)]
+pub struct ShareRequest {
+    pub email: String,
+    pub role: ShareRole,
+    /// The token is appended to this, the same way a password reset link is
+    /// built.
+    pub callback_uri: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Member {
+    pub share: Share,
+    pub user: Collaborator,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct People {
+    pub members: Vec<Member>,
+    pub invitations: Vec<Invitation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Shared {
+    Granted(Member),
+    Invited(Invitation),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SharedListing {
+    pub summary: SchemaSummary,
+    pub role: ShareRole,
+    pub owner: Collaborator,
+}
+
 #[derive(Debug, Clone)]
 pub enum ValidationTarget {
     Stored(String),
