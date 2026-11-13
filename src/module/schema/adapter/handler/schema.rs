@@ -8,7 +8,7 @@ use crate::module::schema::adapter::handler::mapper::{
     self, ComparisonCounts, Diagnostic, Schema, SchemaDifference, SchemaPayload, SchemaSummary,
     Violations,
 };
-use crate::module::schema::core::domain::{Comparison, ExchangeFormat};
+use crate::module::schema::core::domain::{Access, Comparison, ExchangeFormat};
 use crate::module::schema::core::ports::{
     CompareRequest, ExportRequest, GenerateOptions, GenerateRequest, ImportRequest, SchemaService,
     ValidationTarget,
@@ -184,7 +184,9 @@ pub async fn create(
         .create(caller.id(), mapper::draft_from(payload)?)
         .await?;
 
-    Ok(response::ok(Schema::from(schema)))
+    Ok(response::ok(
+        Schema::from(schema).with_access(Access::Owner),
+    ))
 }
 
 #[tracing::instrument(name = "SchemaHandler.Get", skip_all)]
@@ -194,8 +196,9 @@ pub async fn get(
     Path(schema_id): Path<String>,
 ) -> Result<AxumJson<Response<Schema>>, Error> {
     let schema = service.find_by_id(caller.id(), &schema_id).await?;
+    let access = service.access(caller.id(), &schema_id).await?;
 
-    Ok(response::ok(Schema::from(schema)))
+    Ok(response::ok(Schema::from(schema).with_access(access)))
 }
 
 /// The canvas holds the authoritative picture, so it sends the whole picture
@@ -210,8 +213,9 @@ pub async fn replace(
     let schema = service
         .replace(caller.id(), &schema_id, mapper::draft_from(payload)?)
         .await?;
+    let access = service.access(caller.id(), &schema_id).await?;
 
-    Ok(response::ok(Schema::from(schema)))
+    Ok(response::ok(Schema::from(schema).with_access(access)))
 }
 
 #[tracing::instrument(name = "SchemaHandler.Delete", skip_all)]
@@ -566,6 +570,16 @@ mod tests {
 
             Ok(Comparison::default())
         }
+
+        async fn access(&self, caller: Uuid, _id: &str) -> Result<Access, Error> {
+            self.guard(caller)?;
+
+            Ok(Access::Owner)
+        }
+
+        async fn claim_invitations(&self, _user_id: Uuid, _email: &str) -> Result<usize, Error> {
+            Ok(0)
+        }
     }
 
     fn state(service: SpyService) -> State<SchemaState> {
@@ -846,7 +860,11 @@ mod tests {
 
         let callers = spy.callers.lock().expect("the lock should be held");
 
-        assert_eq!(callers.len(), 8);
+        assert_eq!(
+            callers.len(),
+            10,
+            "get and replace also ask what the caller may do"
+        );
         assert!(callers.iter().all(|seen| *seen == caller().id()));
     }
 

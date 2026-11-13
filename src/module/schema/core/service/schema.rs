@@ -5,11 +5,11 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use crate::module::schema::core::domain::{
-    Comparison, Dialect, DomainError, Report, Schema, SchemaDraft, SchemaSummary,
+    Access, Comparison, Dialect, DomainError, Grant, Report, Schema, SchemaDraft, SchemaSummary,
 };
 use crate::module::schema::core::ports::{
     CompareRequest, ExportRequest, Exported, GenerateRequest, Generated, Generator, ImportRequest,
-    Imported, SchemaRepository, SchemaService, ValidationTarget, Verifier,
+    Imported, SchemaRepository, SchemaService, ShareRepository, ValidationTarget, Verifier,
 };
 use crate::package::errdef::Error;
 use crate::package::pagination::{Data, ListRequest};
@@ -18,8 +18,16 @@ use super::exchange;
 
 const MAX_NAME_LENGTH: usize = 120;
 
+#[derive(Debug, Clone, Copy)]
+enum Need {
+    Read,
+    Edit,
+    Own,
+}
+
 pub struct SchemaServiceImpl {
     repository: Arc<dyn SchemaRepository>,
+    shares: Arc<dyn ShareRepository>,
     verifier: Arc<dyn Verifier>,
     generators: Vec<Arc<dyn Generator>>,
 }
@@ -27,14 +35,43 @@ pub struct SchemaServiceImpl {
 impl SchemaServiceImpl {
     pub fn new(
         repository: Arc<dyn SchemaRepository>,
+        shares: Arc<dyn ShareRepository>,
         verifier: Arc<dyn Verifier>,
         generators: Vec<Arc<dyn Generator>>,
     ) -> Self {
         Self {
             repository,
+            shares,
             verifier,
             generators,
         }
+    }
+
+    /// No standing at all reads as missing, so a private schema cannot be
+    /// probed for. Standing that falls short is refused out loud, because a
+    /// viewer already knows the schema is there.
+    async fn grant(&self, caller: Uuid, id: &str, need: Need) -> Result<Grant, Error> {
+        let grant = self
+            .shares
+            .grant(caller, id)
+            .await
+            .map_err(to_error)?
+            .ok_or_else(|| Error::not_found("schema does not exist"))?;
+
+        let allowed = match need {
+            Need::Read => true,
+            Need::Edit => grant.access.can_edit(),
+            Need::Own => grant.access.is_owner(),
+        };
+
+        if !allowed {
+            return Err(Error::forbidden(match need {
+                Need::Edit => "only an editor or the owner may change this schema",
+                _ => "only the owner may do that to this schema",
+            }));
+        }
+
+        Ok(grant)
     }
 
     async fn resolve(&self, caller: Uuid, target: ValidationTarget) -> Result<Schema, Error> {
@@ -89,6 +126,14 @@ fn to_error(failure: DomainError) -> Error {
         DomainError::DuplicateSchemaName(name) => {
             Error::conflict(format!("a schema named `{name}` already exists"))
         }
+        DomainError::AlreadyShared(who) => {
+            Error::conflict(format!("`{who}` already has access to this schema"))
+        }
+        DomainError::AlreadyInvited(email) => {
+            Error::conflict(format!("`{email}` has already been invited to this schema"))
+        }
+        DomainError::ShareNotFound => Error::not_found("share does not exist"),
+        DomainError::InvitationNotFound => Error::not_found("invitation does not exist"),
         other => Error::unknown(other),
     }
 }
@@ -129,9 +174,11 @@ impl SchemaService for SchemaServiceImpl {
 
     #[tracing::instrument(name = "SchemaService.FindById", skip_all, fields(schema.id = %id))]
     async fn find_by_id(&self, caller: Uuid, id: &str) -> Result<Schema, Error> {
+        let grant = self.grant(caller, id, Need::Read).await?;
+
         let schema = self
             .repository
-            .find_by_id(caller, id)
+            .find_by_id(grant.owner, id)
             .await
             .map_err(to_error)?
             .ok_or_else(|| Error::not_found("schema does not exist"))?;
@@ -145,9 +192,11 @@ impl SchemaService for SchemaServiceImpl {
     async fn replace(&self, caller: Uuid, id: &str, draft: SchemaDraft) -> Result<Schema, Error> {
         Self::check_draft(&draft)?;
 
+        let grant = self.grant(caller, id, Need::Edit).await?;
+
         let schema = self
             .repository
-            .replace(caller, id, draft)
+            .replace(grant.owner, id, draft)
             .await
             .map_err(to_error)?;
 
@@ -158,7 +207,12 @@ impl SchemaService for SchemaServiceImpl {
 
     #[tracing::instrument(name = "SchemaService.Delete", skip_all, fields(schema.id = %id))]
     async fn delete(&self, caller: Uuid, id: &str) -> Result<(), Error> {
-        self.repository.delete(caller, id).await.map_err(to_error)?;
+        let grant = self.grant(caller, id, Need::Own).await?;
+
+        self.repository
+            .delete(grant.owner, id)
+            .await
+            .map_err(to_error)?;
 
         tracing::info!("schema deleted");
 
@@ -279,6 +333,26 @@ impl SchemaService for SchemaServiceImpl {
 
         Ok(comparison)
     }
+
+    #[tracing::instrument(name = "SchemaService.Access", skip_all, fields(schema.id = %id))]
+    async fn access(&self, caller: Uuid, id: &str) -> Result<Access, Error> {
+        Ok(self.grant(caller, id, Need::Read).await?.access)
+    }
+
+    #[tracing::instrument(name = "SchemaService.ClaimInvitations", skip_all)]
+    async fn claim_invitations(&self, user_id: Uuid, email: &str) -> Result<usize, Error> {
+        let shares = self
+            .shares
+            .claim_invitations(email, user_id, Utc::now())
+            .await
+            .map_err(to_error)?;
+
+        if !shares.is_empty() {
+            tracing::info!(%user_id, claimed = shares.len(), "invitations claimed");
+        }
+
+        Ok(shares.len())
+    }
 }
 
 #[cfg(test)]
@@ -291,9 +365,11 @@ mod tests {
 
     use crate::module::schema::core::domain::{
         diagnostic_code, Attribute, DataType, DataTypeKind, Diagnostic, Entity, ExchangeFormat,
+        Grant, Invitation, Share, ShareRole, SharedSchema,
     };
-    use crate::module::schema::core::ports::GenerateOptions;
+    use crate::module::schema::core::ports::{GenerateOptions, InvitationDraft};
     use crate::module::schema::core::sample;
+    use crate::module::schema::core::service::fake_shares::FakeShares;
     use crate::module::schema::core::service::{PostgresGenerator, SchemaVerifier};
     use crate::package::errdef::code;
 
@@ -315,6 +391,7 @@ mod tests {
     struct FakeRepository {
         schemas: Mutex<Vec<(Uuid, Schema)>>,
         fail_with: Option<fn() -> DomainError>,
+        shares: FakeShares,
     }
 
     impl FakeRepository {
@@ -326,6 +403,7 @@ mod tests {
             Self {
                 schemas: Mutex::new(schemas.into_iter().map(|schema| (owner, schema)).collect()),
                 fail_with: None,
+                shares: FakeShares::default(),
             }
         }
 
@@ -333,7 +411,15 @@ mod tests {
             Self {
                 schemas: Mutex::new(Vec::new()),
                 fail_with: Some(failure),
+                shares: FakeShares::default(),
             }
+        }
+
+        fn owner_of(&self, id: &str) -> Option<Uuid> {
+            self.lock()
+                .iter()
+                .find(|(_, schema)| schema.id == id)
+                .map(|(by, _)| *by)
         }
 
         fn guard(&self) -> Result<(), DomainError> {
@@ -462,9 +548,112 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl ShareRepository for FakeRepository {
+        async fn grant(&self, caller: Uuid, id: &str) -> Result<Option<Grant>, DomainError> {
+            self.guard()?;
+
+            let Some(owner) = self.owner_of(id) else {
+                return Ok(None);
+            };
+
+            if owner == caller {
+                return Ok(Some(Grant {
+                    owner,
+                    access: Access::Owner,
+                }));
+            }
+
+            Ok(self.shares.share_of(id, caller).map(|share| Grant {
+                owner,
+                access: Access::Shared(share.role),
+            }))
+        }
+
+        async fn shared_with(
+            &self,
+            caller: Uuid,
+            request: &ListRequest,
+        ) -> Result<(Vec<SharedSchema>, i64), DomainError> {
+            self.shares.shared_with(caller, request).await
+        }
+
+        async fn shares(&self, id: &str) -> Result<Vec<Share>, DomainError> {
+            self.shares.shares(id).await
+        }
+
+        async fn invitations(&self, id: &str) -> Result<Vec<Invitation>, DomainError> {
+            self.shares.invitations(id).await
+        }
+
+        async fn create_share(
+            &self,
+            id: &str,
+            user_id: Uuid,
+            role: ShareRole,
+            shared_by: Uuid,
+        ) -> Result<Share, DomainError> {
+            self.shares.create_share(id, user_id, role, shared_by).await
+        }
+
+        async fn update_share(
+            &self,
+            id: &str,
+            user_id: Uuid,
+            role: ShareRole,
+        ) -> Result<Share, DomainError> {
+            self.shares.update_share(id, user_id, role).await
+        }
+
+        async fn delete_share(&self, id: &str, user_id: Uuid) -> Result<(), DomainError> {
+            self.shares.delete_share(id, user_id).await
+        }
+
+        async fn create_invitation(
+            &self,
+            draft: InvitationDraft,
+        ) -> Result<Invitation, DomainError> {
+            self.shares.create_invitation(draft).await
+        }
+
+        async fn delete_invitation(&self, id: &str, invitation: Uuid) -> Result<(), DomainError> {
+            self.shares.delete_invitation(id, invitation).await
+        }
+
+        async fn find_invitation_by_token(
+            &self,
+            token_hash: &str,
+        ) -> Result<Option<Invitation>, DomainError> {
+            self.shares.find_invitation_by_token(token_hash).await
+        }
+
+        async fn accept_invitation(
+            &self,
+            invitation: Uuid,
+            user_id: Uuid,
+        ) -> Result<Share, DomainError> {
+            self.shares.accept_invitation(invitation, user_id).await
+        }
+
+        async fn claim_invitations(
+            &self,
+            email: &str,
+            user_id: Uuid,
+            now: DateTime<Utc>,
+        ) -> Result<Vec<Share>, DomainError> {
+            self.shares.claim_invitations(email, user_id, now).await
+        }
+    }
+
     fn service(repository: FakeRepository) -> SchemaServiceImpl {
+        service_on(Arc::new(repository))
+    }
+
+    /// One fake plays both stores, so ownership and shares agree.
+    fn service_on(repository: Arc<FakeRepository>) -> SchemaServiceImpl {
         SchemaServiceImpl::new(
-            Arc::new(repository),
+            repository.clone(),
+            repository,
             Arc::new(SchemaVerifier),
             vec![Arc::new(PostgresGenerator)],
         )
@@ -728,8 +917,10 @@ mod tests {
     #[tokio::test]
     async fn validating_a_stored_schema_hands_it_to_the_verifier() {
         let verifier = Arc::new(SeenVerifier(Mutex::new(None)));
+        let repository = Arc::new(FakeRepository::holding(vec![stored("s1", "blog")]));
         let service = SchemaServiceImpl::new(
-            Arc::new(FakeRepository::holding(vec![stored("s1", "blog")])),
+            repository.clone(),
+            repository,
             verifier.clone(),
             vec![Arc::new(PostgresGenerator)],
         );
@@ -754,11 +945,7 @@ mod tests {
     #[tokio::test]
     async fn a_draft_is_verified_without_being_stored() {
         let repository = Arc::new(FakeRepository::default());
-        let service = SchemaServiceImpl::new(
-            repository.clone(),
-            Arc::new(SchemaVerifier),
-            vec![Arc::new(PostgresGenerator)],
-        );
+        let service = service_on(repository.clone());
 
         let report = service
             .validate(
@@ -875,11 +1062,7 @@ mod tests {
     #[tokio::test]
     async fn a_draft_is_exported_without_being_stored() {
         let repository = Arc::new(FakeRepository::default());
-        let service = SchemaServiceImpl::new(
-            repository.clone(),
-            Arc::new(SchemaVerifier),
-            vec![Arc::new(PostgresGenerator)],
-        );
+        let service = service_on(repository.clone());
 
         let exported = service
             .export(
@@ -919,11 +1102,7 @@ mod tests {
     #[tokio::test]
     async fn an_imported_file_comes_back_as_a_draft_with_no_id() {
         let repository = Arc::new(FakeRepository::default());
-        let service = SchemaServiceImpl::new(
-            repository.clone(),
-            Arc::new(SchemaVerifier),
-            vec![Arc::new(PostgresGenerator)],
-        );
+        let service = service_on(repository.clone());
 
         let imported = service
             .import(ImportRequest {

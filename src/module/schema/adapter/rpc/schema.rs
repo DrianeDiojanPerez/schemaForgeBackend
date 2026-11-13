@@ -344,7 +344,7 @@ mod tests {
     use tonic::Code;
 
     use crate::module::schema::core::domain::{
-        Comparison, Report, Schema, SchemaDraft, SchemaSummary,
+        Access, Comparison, Report, Schema, SchemaDraft, SchemaSummary,
     };
     use crate::module::schema::core::ports::{Exported, Generated, Imported};
     use crate::package::auth::Identity;
@@ -485,6 +485,16 @@ mod tests {
             }
 
             Ok(Comparison::default())
+        }
+
+        async fn access(&self, caller: Uuid, _id: &str) -> Result<Access, Error> {
+            self.guard(caller)?;
+
+            Ok(Access::Owner)
+        }
+
+        async fn claim_invitations(&self, _user_id: Uuid, _email: &str) -> Result<usize, Error> {
+            Ok(0)
         }
     }
 

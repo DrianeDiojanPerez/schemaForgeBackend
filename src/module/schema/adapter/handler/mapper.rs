@@ -148,6 +148,16 @@ pub struct Schema {
     pub relationships: Vec<Relationship>,
     pub created_at: String,
     pub updated_at: String,
+    /// Absent on a draft nobody has stored yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access: Option<String>,
+}
+
+impl Schema {
+    pub fn with_access(mut self, access: domain::Access) -> Self {
+        self.access = Some(access.to_string());
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -256,6 +266,7 @@ impl From<domain::Schema> for Schema {
                 .collect(),
             created_at: schema.created_at.to_rfc3339(),
             updated_at: schema.updated_at.to_rfc3339(),
+            access: None,
         }
     }
 }

@@ -3,8 +3,8 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::module::schema::core::domain::{
-    Collaborator, Comparison, Dialect, DomainError, ExchangeFormat, Grant, Invitation, Report,
-    Schema, SchemaDraft, SchemaSummary, Share, ShareRole, SharedSchema,
+    Access, Collaborator, Comparison, Dialect, DomainError, ExchangeFormat, Grant, Invitation,
+    Report, Schema, SchemaDraft, SchemaSummary, Share, ShareRole, SharedSchema,
 };
 use crate::package::errdef::Error;
 use crate::package::pagination::{Data, ListRequest};
@@ -159,6 +159,12 @@ pub trait SchemaService: Send + Sync {
     /// Measures one schema against another, which is how a case study says
     /// what a round trip through SQL actually kept.
     async fn compare(&self, caller: Uuid, request: CompareRequest) -> Result<Comparison, Error>;
+
+    /// So the canvas can open a shared schema read-only rather than find
+    /// out on the first save.
+    async fn access(&self, caller: Uuid, id: &str) -> Result<Access, Error>;
+
+    async fn claim_invitations(&self, user_id: Uuid, email: &str) -> Result<usize, Error>;
 }
 
 #[async_trait]

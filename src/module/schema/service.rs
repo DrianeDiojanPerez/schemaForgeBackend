@@ -37,6 +37,7 @@ impl Services {
         Self {
             schema: Arc::new(SchemaServiceImpl::new(
                 repository.clone(),
+                shares.clone(),
                 Arc::new(SchemaVerifier),
                 vec![Arc::new(PostgresGenerator)],
             )),
