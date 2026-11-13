@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use lettre::message::header::ContentType;
+use lettre::message::header::{ContentType, MIME_VERSION_1_0};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 
@@ -85,6 +85,19 @@ impl SmtpEmailer {
             body.replace(&format!("{{{{{key}}}}}"), value)
         }))
     }
+
+    // Gmail takes a mail without these two headers and then quietly drops
+    // it, so the sender sees a success and the inbox never sees the mail.
+    fn message(from: &str, to: &str, subject: &str, body: String) -> Result<Message, EmailerError> {
+        Ok(Message::builder()
+            .from(from.parse()?)
+            .to(to.parse()?)
+            .subject(subject)
+            .message_id(None)
+            .header(MIME_VERSION_1_0)
+            .header(ContentType::TEXT_HTML)
+            .body(body)?)
+    }
 }
 
 #[async_trait]
@@ -98,14 +111,9 @@ impl Emailer for SmtpEmailer {
     ) -> Result<(), EmailerError> {
         let body = Self::render(template_name, &data)?;
 
-        let message = Message::builder()
-            .from(self.from.parse()?)
-            .to(to.parse()?)
-            .subject(subject)
-            .header(ContentType::TEXT_HTML)
-            .body(body)?;
-
-        self.transport.send(message).await?;
+        self.transport
+            .send(Self::message(&self.from, to, subject, body)?)
+            .await?;
 
         Ok(())
     }
@@ -171,6 +179,34 @@ mod tests {
         assert!(body.contains("You can now edit <strong"));
         assert!(body.contains("href=\"https://example.com/\""));
         assert!(!body.contains("{{"));
+    }
+
+    #[test]
+    fn a_message_carries_the_headers_gmail_drops_it_without() {
+        let message = SmtpEmailer::message(
+            "SchemaForge <noreply@example.com>",
+            "sam@example.com",
+            "Hello",
+            "<p>hi</p>".to_owned(),
+        )
+        .expect("the message should build");
+
+        let raw = String::from_utf8(message.formatted()).expect("the message should be text");
+
+        assert!(raw.contains("MIME-Version: 1.0\r\n"), "{raw}");
+        assert!(raw.contains("Message-ID: <"), "{raw}");
+        assert!(raw.contains("Content-Type: text/html; charset=utf-8\r\n"));
+    }
+
+    #[test]
+    fn a_message_to_an_address_that_is_not_one_is_refused() {
+        assert!(SmtpEmailer::message(
+            "SchemaForge <noreply@example.com>",
+            "not an address",
+            "Hello",
+            String::new(),
+        )
+        .is_err());
     }
 
     #[test]
