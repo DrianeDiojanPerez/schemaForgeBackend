@@ -1054,3 +1054,318 @@ async fn a_comparison_naming_no_target_is_refused() {
 
     assert_eq!(status.code(), Code::InvalidArgument);
 }
+
+// ──── Sharing ──────────────────────────────────
+
+const CALLBACK: &str = "https://app.test/invitations/";
+
+fn share_request(schema_id: &str, email: &str, role: v1::ShareRole) -> v1::ShareSchemaRequest {
+    v1::ShareSchemaRequest {
+        schema_id: schema_id.to_owned(),
+        email: email.to_owned(),
+        role: role as i32,
+        callback_uri: CALLBACK.to_owned(),
+    }
+}
+
+#[tokio::test]
+async fn a_shared_schema_is_listed_for_the_other_person_with_what_they_may_do() {
+    let server = TestServer::start().await;
+    let mut owner = server.schema_client().await;
+    let token = server.another_user().await;
+    let mut friend = server.schema_client_with(&token).await;
+
+    let created = owner
+        .create_schema(create_request("shared"))
+        .await
+        .expect("creation should succeed")
+        .into_inner()
+        .schema
+        .expect("a schema should come back");
+
+    assert_eq!(created.access, "owner");
+
+    let outcome = owner
+        .share_schema(share_request(
+            &created.id,
+            "stranger@example.com",
+            v1::ShareRole::Viewer,
+        ))
+        .await
+        .expect("the share should succeed")
+        .into_inner()
+        .outcome;
+
+    let Some(v1::share_schema_response::Outcome::Member(member)) = outcome else {
+        panic!("an address with an account is granted, not invited");
+    };
+
+    assert_eq!(
+        member.user.map(|user| user.name),
+        Some("Sam Stranger".to_owned())
+    );
+
+    let listed = friend
+        .list_shared_schemas(v1::ListSharedSchemasRequest {
+            page: 1,
+            per_page: 10,
+        })
+        .await
+        .expect("the listing should succeed")
+        .into_inner();
+
+    assert_eq!(listed.total, 1);
+    assert_eq!(listed.schemas[0].role, v1::ShareRole::Viewer as i32);
+    assert_eq!(
+        listed.schemas[0]
+            .schema
+            .as_ref()
+            .map(|schema| schema.name.as_str()),
+        Some("shared")
+    );
+    assert_eq!(
+        listed.schemas[0]
+            .owner
+            .as_ref()
+            .map(|owner| owner.email.as_str()),
+        Some("admin@example.com")
+    );
+
+    let opened = friend
+        .get_schema(v1::GetSchemaRequest {
+            id: created.id.clone(),
+        })
+        .await
+        .expect("a viewer may read")
+        .into_inner()
+        .schema
+        .expect("a schema should come back");
+
+    assert_eq!(opened.access, "viewer");
+
+    let status = friend
+        .update_schema(v1::UpdateSchemaRequest {
+            id: created.id.clone(),
+            name: "taken over".to_owned(),
+            description: String::new(),
+            entities: vec![],
+            relationships: vec![],
+        })
+        .await
+        .expect_err("a viewer may not write");
+
+    assert_eq!(status.code(), Code::PermissionDenied);
+
+    let own = friend
+        .list_schemas(v1::ListSchemasRequest {
+            page: 1,
+            per_page: 10,
+        })
+        .await
+        .expect("the listing should succeed")
+        .into_inner();
+
+    assert_eq!(own.total, 0, "a shared schema is not one of their own");
+}
+
+#[tokio::test]
+async fn an_invitation_goes_out_by_mail_and_is_accepted_by_the_invited_address() {
+    let server = TestServer::start().await;
+    let mut owner = server.schema_client().await;
+
+    let created = owner
+        .create_schema(create_request("invited"))
+        .await
+        .expect("creation should succeed")
+        .into_inner()
+        .schema
+        .expect("a schema should come back");
+
+    let outcome = owner
+        .share_schema(share_request(
+            &created.id,
+            "cat@example.com",
+            v1::ShareRole::Editor,
+        ))
+        .await
+        .expect("the share should succeed")
+        .into_inner()
+        .outcome;
+
+    let Some(v1::share_schema_response::Outcome::Invitation(invitation)) = outcome else {
+        panic!("an address without an account is invited");
+    };
+
+    assert_eq!(invitation.email, "cat@example.com");
+
+    let mail = server.mail.last();
+
+    assert_eq!(mail.to, "cat@example.com");
+    assert_eq!(mail.subject, "App Admin shared \"invited\" with you");
+
+    let people = owner
+        .list_people(v1::ListPeopleRequest {
+            schema_id: created.id.clone(),
+        })
+        .await
+        .expect("the owner may list")
+        .into_inner();
+
+    assert!(people.members.is_empty());
+    assert_eq!(people.invitations[0].id, invitation.id);
+
+    let someone_else = server.another_user().await;
+    let status = server
+        .schema_client_with(&someone_else)
+        .await
+        .accept_invitation(v1::AcceptInvitationRequest {
+            token: mail.token(CALLBACK),
+        })
+        .await
+        .expect_err("a forwarded link does not work for someone else");
+
+    assert_eq!(status.code(), Code::PermissionDenied);
+
+    let cat = server.sign_up("cat@example.com", "Cat").await;
+    let mut cat = server.schema_client_with(&cat).await;
+
+    let accepted = cat
+        .accept_invitation(v1::AcceptInvitationRequest {
+            token: mail.token(CALLBACK),
+        })
+        .await
+        .expect("the invited person may accept")
+        .into_inner()
+        .schema
+        .expect("a schema should come back");
+
+    assert_eq!(accepted.role, v1::ShareRole::Editor as i32);
+    assert_eq!(
+        accepted.schema.map(|schema| schema.id),
+        Some(created.id.clone())
+    );
+
+    let status = cat
+        .accept_invitation(v1::AcceptInvitationRequest {
+            token: mail.token(CALLBACK),
+        })
+        .await
+        .expect_err("a link works once");
+
+    assert_eq!(status.code(), Code::NotFound);
+
+    let updated = cat
+        .update_schema(v1::UpdateSchemaRequest {
+            id: created.id.clone(),
+            name: "edited by cat".to_owned(),
+            description: String::new(),
+            entities: vec![],
+            relationships: vec![],
+        })
+        .await
+        .expect("an editor may write")
+        .into_inner()
+        .schema
+        .expect("a schema should come back");
+
+    assert_eq!(updated.access, "editor");
+}
+
+#[tokio::test]
+async fn only_the_owner_manages_who_is_in_and_a_role_can_change_or_go() {
+    let server = TestServer::start().await;
+    let mut owner = server.schema_client().await;
+    let token = server.another_user().await;
+    let mut friend = server.schema_client_with(&token).await;
+
+    let created = owner
+        .create_schema(create_request("managed"))
+        .await
+        .expect("creation should succeed")
+        .into_inner()
+        .schema
+        .expect("a schema should come back");
+
+    let Some(v1::share_schema_response::Outcome::Member(member)) = owner
+        .share_schema(share_request(
+            &created.id,
+            "stranger@example.com",
+            v1::ShareRole::Viewer,
+        ))
+        .await
+        .expect("the share should succeed")
+        .into_inner()
+        .outcome
+    else {
+        panic!("an address with an account is granted");
+    };
+    let friend_id = member.user.expect("the member names the user").id;
+
+    let status = friend
+        .share_schema(share_request(
+            &created.id,
+            "cat@example.com",
+            v1::ShareRole::Viewer,
+        ))
+        .await
+        .expect_err("a viewer may not share");
+
+    assert_eq!(status.code(), Code::PermissionDenied);
+
+    let changed = owner
+        .change_share_role(v1::ChangeShareRoleRequest {
+            schema_id: created.id.clone(),
+            user_id: friend_id.clone(),
+            role: v1::ShareRole::Editor as i32,
+        })
+        .await
+        .expect("the owner may change a role")
+        .into_inner()
+        .member
+        .expect("the member comes back");
+
+    assert_eq!(changed.role, v1::ShareRole::Editor as i32);
+
+    owner
+        .revoke_share(v1::RevokeShareRequest {
+            schema_id: created.id.clone(),
+            user_id: friend_id,
+        })
+        .await
+        .expect("the owner may revoke");
+
+    let status = friend
+        .get_schema(v1::GetSchemaRequest {
+            id: created.id.clone(),
+        })
+        .await
+        .expect_err("access is gone");
+
+    assert_eq!(status.code(), Code::NotFound);
+}
+
+#[tokio::test]
+async fn sharing_needs_the_update_permission_and_accepting_only_a_token() {
+    let server = TestServer::with_permissions(&["Schemas.View All", "Schemas.Create"]).await;
+    let mut client = server.schema_client().await;
+
+    let status = client
+        .share_schema(share_request(
+            "s1",
+            "bob@example.com",
+            v1::ShareRole::Viewer,
+        ))
+        .await
+        .expect_err("sharing is changing a schema");
+
+    assert_eq!(status.code(), Code::Unauthenticated);
+
+    let status = client
+        .accept_invitation(v1::AcceptInvitationRequest {
+            token: "nope".to_owned(),
+        })
+        .await
+        .expect_err("the token names nothing, but the call got through");
+
+    assert_eq!(status.code(), Code::NotFound);
+}
