@@ -257,6 +257,39 @@ impl TryFrom<StoredRelationship> for Relationship {
     }
 }
 
+/// The cause is only ever logged, so the database's own wording is kept
+/// rather than flattened into something the caller would see anyway.
+pub(super) fn storage(err: sqlx::Error) -> DomainError {
+    tracing::warn!(error = %err, "query failed");
+
+    DomainError::Storage(err.to_string())
+}
+
+/// An id that is not a UUID cannot name a stored row, so it reads as
+/// missing rather than as a malformed request the caller has to handle
+/// differently from a deleted schema.
+pub(super) fn parse_id(id: &str) -> Option<Uuid> {
+    Uuid::parse_str(id).ok()
+}
+
+/// The counts come from the database rather than from a decoded document,
+/// so a listing never pays for parsing entities it does not return.
+pub(super) fn map_summary(row: &PgRow) -> Result<SchemaSummary, DomainError> {
+    let id: Uuid = row.try_get("id").map_err(storage)?;
+    let entity_count: i32 = row.try_get("entity_count").map_err(storage)?;
+    let relationship_count: i32 = row.try_get("relationship_count").map_err(storage)?;
+
+    Ok(SchemaSummary {
+        id: id.to_string(),
+        name: row.try_get("name").map_err(storage)?,
+        description: row.try_get("description").map_err(storage)?,
+        entity_count: entity_count.max(0) as u32,
+        relationship_count: relationship_count.max(0) as u32,
+        created_at: row.try_get("created_at").map_err(storage)?,
+        updated_at: row.try_get("updated_at").map_err(storage)?,
+    })
+}
+
 pub struct PgSchemaRepository {
     db: Arc<Database>,
 }
@@ -264,14 +297,6 @@ pub struct PgSchemaRepository {
 impl PgSchemaRepository {
     pub fn new(db: Arc<Database>) -> Self {
         Self { db }
-    }
-
-    /// The cause is only ever logged, so the database's own wording is kept
-    /// rather than flattened into something the caller would see anyway.
-    fn storage(err: sqlx::Error) -> DomainError {
-        tracing::warn!(error = %err, "query failed");
-
-        DomainError::Storage(err.to_string())
     }
 
     /// A name only has to be unique among one user's schemas, and the owner
@@ -289,7 +314,7 @@ impl PgSchemaRepository {
             .bind(name)
             .execute(&mut *conn)
             .await
-            .map_err(Self::storage)?;
+            .map_err(storage)?;
 
         let taken: bool = sqlx::query_scalar(
             "SELECT EXISTS (\
@@ -302,7 +327,7 @@ impl PgSchemaRepository {
         .bind(except)
         .fetch_one(&mut *conn)
         .await
-        .map_err(Self::storage)?;
+        .map_err(storage)?;
 
         if taken {
             return Err(DomainError::DuplicateSchemaName(name.to_owned()));
@@ -311,23 +336,16 @@ impl PgSchemaRepository {
         Ok(())
     }
 
-    /// An id that is not a UUID cannot name a stored row, so it reads as
-    /// missing rather than as a malformed request the caller has to handle
-    /// differently from a deleted schema.
-    fn parse_id(id: &str) -> Option<Uuid> {
-        Uuid::parse_str(id).ok()
-    }
-
     fn map_schema(row: &PgRow) -> Result<Schema, DomainError> {
-        let id: Uuid = row.try_get("id").map_err(Self::storage)?;
-        let entities: Json<Vec<StoredEntity>> = row.try_get("entities").map_err(Self::storage)?;
+        let id: Uuid = row.try_get("id").map_err(storage)?;
+        let entities: Json<Vec<StoredEntity>> = row.try_get("entities").map_err(storage)?;
         let relationships: Json<Vec<StoredRelationship>> =
-            row.try_get("relationships").map_err(Self::storage)?;
+            row.try_get("relationships").map_err(storage)?;
 
         Ok(Schema {
             id: id.to_string(),
-            name: row.try_get("name").map_err(Self::storage)?,
-            description: row.try_get("description").map_err(Self::storage)?,
+            name: row.try_get("name").map_err(storage)?,
+            description: row.try_get("description").map_err(storage)?,
             entities: entities
                 .0
                 .into_iter()
@@ -338,26 +356,8 @@ impl PgSchemaRepository {
                 .into_iter()
                 .map(Relationship::try_from)
                 .collect::<Result<Vec<_>, _>>()?,
-            created_at: row.try_get("created_at").map_err(Self::storage)?,
-            updated_at: row.try_get("updated_at").map_err(Self::storage)?,
-        })
-    }
-
-    /// The counts come from the database rather than from a decoded document,
-    /// so a listing never pays for parsing entities it does not return.
-    fn map_summary(row: &PgRow) -> Result<SchemaSummary, DomainError> {
-        let id: Uuid = row.try_get("id").map_err(Self::storage)?;
-        let entity_count: i32 = row.try_get("entity_count").map_err(Self::storage)?;
-        let relationship_count: i32 = row.try_get("relationship_count").map_err(Self::storage)?;
-
-        Ok(SchemaSummary {
-            id: id.to_string(),
-            name: row.try_get("name").map_err(Self::storage)?,
-            description: row.try_get("description").map_err(Self::storage)?,
-            entity_count: entity_count.max(0) as u32,
-            relationship_count: relationship_count.max(0) as u32,
-            created_at: row.try_get("created_at").map_err(Self::storage)?,
-            updated_at: row.try_get("updated_at").map_err(Self::storage)?,
+            created_at: row.try_get("created_at").map_err(storage)?,
+            updated_at: row.try_get("updated_at").map_err(storage)?,
         })
     }
 
@@ -381,7 +381,7 @@ impl SchemaRepository for PgSchemaRepository {
                 .bind(owner)
                 .fetch_one(self.db.pool())
                 .await
-                .map_err(Self::storage)?;
+                .map_err(storage)?;
 
         let rows = sqlx::query(&format!(
             "{SELECT_SUMMARY} WHERE us.user_id = $1 \
@@ -392,11 +392,11 @@ impl SchemaRepository for PgSchemaRepository {
         .bind(request.offset())
         .fetch_all(self.db.pool())
         .await
-        .map_err(Self::storage)?;
+        .map_err(storage)?;
 
         let summaries = rows
             .iter()
-            .map(Self::map_summary)
+            .map(map_summary)
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok((summaries, total))
@@ -407,7 +407,7 @@ impl SchemaRepository for PgSchemaRepository {
         let description = draft.description.clone();
         let (entities, relationships) = Self::drawing(draft);
 
-        let mut tx = self.db.pool().begin().await.map_err(Self::storage)?;
+        let mut tx = self.db.pool().begin().await.map_err(storage)?;
 
         Self::reserve_name(&mut tx, owner, &name, None).await?;
 
@@ -421,10 +421,10 @@ impl SchemaRepository for PgSchemaRepository {
         .bind(Json(&relationships))
         .fetch_one(&mut *tx)
         .await
-        .map_err(Self::storage)?;
+        .map_err(storage)?;
 
         let schema = Self::map_schema(&row)?;
-        let id: Uuid = row.try_get("id").map_err(Self::storage)?;
+        let id: Uuid = row.try_get("id").map_err(storage)?;
 
         sqlx::query(
             "INSERT INTO schemaforge.user_schemas (user_id, schema_id, created_at) \
@@ -435,15 +435,15 @@ impl SchemaRepository for PgSchemaRepository {
         .bind(schema.created_at)
         .execute(&mut *tx)
         .await
-        .map_err(Self::storage)?;
+        .map_err(storage)?;
 
-        tx.commit().await.map_err(Self::storage)?;
+        tx.commit().await.map_err(storage)?;
 
         Ok(schema)
     }
 
     async fn find_by_id(&self, owner: Uuid, id: &str) -> Result<Option<Schema>, DomainError> {
-        let Some(uuid) = Self::parse_id(id) else {
+        let Some(uuid) = parse_id(id) else {
             return Ok(None);
         };
 
@@ -454,7 +454,7 @@ impl SchemaRepository for PgSchemaRepository {
         .bind(uuid)
         .fetch_optional(self.db.pool())
         .await
-        .map_err(Self::storage)?;
+        .map_err(storage)?;
 
         row.as_ref().map(Self::map_schema).transpose()
     }
@@ -467,7 +467,7 @@ impl SchemaRepository for PgSchemaRepository {
         .bind(name)
         .fetch_optional(self.db.pool())
         .await
-        .map_err(Self::storage)?;
+        .map_err(storage)?;
 
         row.as_ref().map(Self::map_schema).transpose()
     }
@@ -478,13 +478,13 @@ impl SchemaRepository for PgSchemaRepository {
         id: &str,
         draft: SchemaDraft,
     ) -> Result<Schema, DomainError> {
-        let uuid = Self::parse_id(id).ok_or(DomainError::SchemaNotFound)?;
+        let uuid = parse_id(id).ok_or(DomainError::SchemaNotFound)?;
 
         let name = draft.name.clone();
         let description = draft.description.clone();
         let (entities, relationships) = Self::drawing(draft);
 
-        let mut tx = self.db.pool().begin().await.map_err(Self::storage)?;
+        let mut tx = self.db.pool().begin().await.map_err(storage)?;
 
         Self::reserve_name(&mut tx, owner, &name, Some(uuid)).await?;
 
@@ -504,18 +504,18 @@ impl SchemaRepository for PgSchemaRepository {
         .bind(Json(&relationships))
         .fetch_optional(&mut *tx)
         .await
-        .map_err(Self::storage)?
+        .map_err(storage)?
         .ok_or(DomainError::SchemaNotFound)?;
 
         let schema = Self::map_schema(&row)?;
 
-        tx.commit().await.map_err(Self::storage)?;
+        tx.commit().await.map_err(storage)?;
 
         Ok(schema)
     }
 
     async fn delete(&self, owner: Uuid, id: &str) -> Result<(), DomainError> {
-        let uuid = Self::parse_id(id).ok_or(DomainError::SchemaNotFound)?;
+        let uuid = parse_id(id).ok_or(DomainError::SchemaNotFound)?;
 
         let result = sqlx::query(
             "DELETE FROM schemaforge.schemas s \
@@ -526,7 +526,7 @@ impl SchemaRepository for PgSchemaRepository {
         .bind(uuid)
         .execute(self.db.pool())
         .await
-        .map_err(Self::storage)?;
+        .map_err(storage)?;
 
         if result.rows_affected() == 0 {
             return Err(DomainError::SchemaNotFound);
@@ -634,7 +634,7 @@ mod tests {
 
     #[test]
     fn an_id_that_is_not_a_uuid_names_nothing() {
-        assert!(PgSchemaRepository::parse_id("does-not-exist").is_none());
-        assert!(PgSchemaRepository::parse_id(&Uuid::new_v4().to_string()).is_some());
+        assert!(parse_id("does-not-exist").is_none());
+        assert!(parse_id(&Uuid::new_v4().to_string()).is_some());
     }
 }
