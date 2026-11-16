@@ -208,7 +208,12 @@ fn description(path: &str, expected: &str, actual: &str, comparison: &mut Compar
 fn position(path: &str, expected: &Entity, actual: &Entity, comparison: &mut Comparison) {
     let spell = |entity: &Entity| format!("{}, {}", entity.position.x, entity.position.y);
 
-    match expected.position == actual.position {
+    // A table dragged by hand sits between pixels, and the SQL comment
+    // that carries its place holds whole numbers. Two places in the same
+    // pixel are the same place on the canvas.
+    let pixel = |entity: &Entity| (entity.position.x.round(), entity.position.y.round());
+
+    match pixel(expected) == pixel(actual) {
         true => comparison.counts_mut(Category::Positions).matched += 1,
         false => comparison.record(
             Category::Positions,
@@ -682,5 +687,17 @@ mod tests {
 
         assert_eq!(ignored.positions, Counts::default());
         assert!(ignored.is_equal());
+    }
+
+    #[test]
+    fn a_table_within_the_same_pixel_has_not_moved() {
+        let mut dragged = drawn();
+        dragged.entities[0].position = Position::new(40.4, 79.6);
+
+        assert!(compare(&drawn(), &dragged, true).is_equal());
+
+        dragged.entities[0].position = Position::new(40.6, 80.0);
+
+        assert_eq!(compare(&drawn(), &dragged, true).positions.changed, 1);
     }
 }
